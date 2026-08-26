@@ -1,271 +1,225 @@
 import io
-import re
 import streamlit as st
 import pandas as pd
+from PIL import Image
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.worksheet.page import PageMargins
 from openpyxl.utils import get_column_letter
-from deep_translator import GoogleTranslator
 
 # ============================================================
 # CẤU HÌNH STREAMLIT
 # ============================================================
-
 st.set_page_config(
-    page_title="Bảng chấm công Trung - Việt",
+    page_title="Chuyển Đổi Bảng Song Ngữ Động",
     page_icon="📊",
-    layout="centered"
+    layout="wide"
 )
 
-# ============================================================
-# TIÊU ĐỀ
-# ============================================================
-
-st.title("📊 Bảng chấm công Trung - Việt")
-st.caption("Ứng dụng xử lý động cho tất cả các file tải lên (Ảnh & Excel)")
+st.title("📊 Chuyển Đổi Bảng Tùy Biến (Ảnh & Excel ➔ Excel Chuyên Nghiệp)")
+st.caption("Tự động nhận diện số lượng dòng & cột từ file tải lên, giữ nguyên logic thiết kế/định dạng chuyên nghiệp.")
 
 # ============================================================
-# TẢI FILE ĐẦU VÀO (FILE ẢNH HOẶC FILE EXCEL)
-# ============================================================
-
-uploaded_file = st.file_uploader(
-    "📂 Tải lên file Ảnh (PNG, JPG) hoặc file Excel/CSV",
-    type=["png", "jpg", "jpeg", "xlsx", "xls", "csv"]
-)
-
-# ============================================================
-# HÀM BỔ TRỢ & LOGIC DỊCH TIẾNG TRUNG -> TIẾNG VIỆT
-# ============================================================
-
-def is_chinese(text: str) -> bool:
-    """Kiểm tra chuỗi có chứa tiếng Trung hay không"""
-    if not isinstance(text, str):
-        return False
-    return bool(re.search(r'[\u4e00-\u9fff]', text))
-
-@st.cache_data(show_spinner=False)
-def translate_zh_to_vi(text: str) -> str:
-    """Dịch tự động Tiếng Trung sang Tiếng Việt"""
-    try:
-        translated = GoogleTranslator(source='zh-CN', target='vi').translate(text)
-        return translated if translated else ""
-    except Exception:
-        return ""
-
-def process_cell_bilingual(val):
-    """
-    Logic cốt lõi: Nếu ô chứa Tiếng Trung thì dịch và ghép Tiếng Việt xuống dưới (Trung\nViệt)
-    """
-    if pd.isna(val) or val is None:
-        return ""
-    
-    val_str = str(val).strip()
-    if not val_str:
-        return ""
-    
-    # Nếu là số thuần túy thì giữ nguyên
-    if val_str.replace('.', '', 1).isdigit():
-        return val_str
-
-    # Nếu có tiếng Trung
-    if is_chinese(val_str):
-        if "\n" in val_str:
-            return val_str
-        
-        vi_text = translate_zh_to_vi(val_str)
-        if vi_text and vi_text.lower() != val_str.lower():
-            return f"{val_str}\n{vi_text}"
-            
-    return val_str
-
-# ============================================================
-# HÀM ĐỌC MA TRẬN DỮ LIỆU TỪ FILE LOAD LÊN
+# HÀM XỬ LÝ FILE ĐẦU VÀO (IMAGE & EXCEL)
 # ============================================================
 
 @st.cache_resource
 def load_ocr_reader():
     import easyocr
+    # Khởi tạo EasyOCR cho tiếng Trung giản thể (ch_sim), tiếng Anh (en)
     return easyocr.Reader(['ch_sim', 'en'])
 
-def read_input_matrix(file_obj):
-    """Đọc dữ liệu từ file load lên thành ma trận (DataFrame)"""
-    file_ext = file_obj.name.split('.')[-1].lower()
+def process_image_file(uploaded_file):
+    """Trích xuất ma trận bảng từ file ảnh bằng OCR"""
+    image = Image.open(uploaded_file)
+    reader = load_ocr_reader()
     
-    if file_ext in ['xlsx', 'xls']:
-        return pd.read_excel(file_obj, header=None)
-    elif file_ext == 'csv':
-        return pd.read_csv(file_obj, header=None)
+    # Đọc text kèm tọa độ từ ảnh
+    results = reader.readtext(uploaded_file.getvalue())
     
-    elif file_ext in ['png', 'jpg', 'jpeg']:
-        reader = load_ocr_reader()
-        results = reader.readtext(file_obj.getvalue())
-        if not results:
-            return None
-        
-        results_sorted = sorted(results, key=lambda x: x[0][0][1])
-        lines, current_line, last_y = [], [], None
-        
-        for bbox, text, prob in results_sorted:
-            y_center = (bbox[0][1] + bbox[2][1]) / 2
-            if last_y is None or abs(y_center - last_y) < 18:
-                current_line.append((bbox[0][0], text))
-                last_y = y_center
-            else:
-                current_line.sort(key=lambda x: x[0])
-                lines.append([item[1] for item in current_line])
-                current_line = [(bbox[0][0], text)]
-                last_y = y_center
-                
-        if current_line:
+    if not results:
+        return None
+    
+    # Nhóm các text theo dòng dựa trên tọa độ Y
+    lines = []
+    # Tự động gom dòng dựa vào tọa độ bbox
+    results_sorted = sorted(results, key=lambda x: x[0][0][1]) # Sắp xếp theo y-min
+    
+    current_line = []
+    last_y = None
+    
+    for bbox, text, prob in results_sorted:
+        y_center = (bbox[0][1] + bbox[2][1]) / 2
+        if last_y is None or abs(y_center - last_y) < 15: # Ngưỡng dòng
+            current_line.append((bbox[0][0], text)) # Thêm x-min và text
+            last_y = y_center
+        else:
+            # Sắp xếp các từ trong dòng theo x-min
             current_line.sort(key=lambda x: x[0])
             lines.append([item[1] for item in current_line])
+            current_line = [(bbox[0][0], text)]
+            last_y = y_center
             
-        if lines:
-            max_cols = max(len(l) for l in lines)
-            padded = [l + [""] * (max_cols - len(l)) for l in lines]
-            return pd.DataFrame(padded)
-            
+    if current_line:
+        current_line.sort(key=lambda x: x[0])
+        lines.append([item[1] for item in current_line])
+        
+    # Tạo DataFrame từ các dòng nhận diện được
+    if lines:
+        max_cols = max(len(line) for line in lines)
+        padded_lines = [line + [""] * (max_cols - len(line)) for line in lines]
+        df = pd.DataFrame(padded_lines)
+        return df
     return None
 
+def process_excel_file(uploaded_file):
+    """Đọc dữ liệu từ file Excel/CSV tải lên"""
+    try:
+        if uploaded_file.name.endswith('.csv'):
+            df = pd.read_csv(uploaded_file, header=None)
+        else:
+            df = pd.read_excel(uploaded_file, header=None)
+        return df
+    except Exception as e:
+        st.error(f"Lỗi khi đọc file Excel: {e}")
+        return None
+
 # ============================================================
-# HÀM TẠO FILE EXCEL (GIỮ NGUYÊN LOGIC STYLING CỦA CODE GỐC)
+# HÀM TẠO FILE EXCEL TỰ ĐỘNG THEO MA TRẬN DÒNG x CỘT
 # ============================================================
 
-def create_excel_dynamic(df_matrix):
+def create_dynamic_excel(df_data, title_text="BẢNG DỮ LIỆU / 数据表"):
     wb = Workbook()
     ws = wb.active
-    ws.title = "Bảng song ngữ"
+    ws.title = "Bảng dữ liệu"
 
+    # Style Configurations
     font_name = "Microsoft YaHei"
     orange_fill = PatternFill(fill_type="solid", fgColor="ED7D00")
     thin_side = Side(style="thin", color="000000")
     border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
 
-    num_rows, num_cols = df_matrix.shape
+    num_rows, num_cols = df_data.shape
 
-    for c_idx in range(num_cols):
-        raw_val = df_matrix.iloc[0, c_idx]
-        cell_val = process_cell_bilingual(raw_val)
-        
-        cell = ws.cell(row=1, column=c_idx + 1, value=cell_val)
-        cell.font = Font(name=font_name, size=10, bold=True)
+    # --------------------------------------------------------
+    # 1. TIÊU ĐỀ (Tự động Gộp A1 đến Cột cuối)
+    # --------------------------------------------------------
+    last_col_letter = get_column_letter(num_cols)
+    ws.merge_cells(f"A1:{last_col_letter}1")
+    
+    ws["A1"] = title_text
+    ws["A1"].font = Font(name=font_name, size=13, bold=True)
+    ws["A1"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws.row_dimensions[1].height = 42
+
+    # --------------------------------------------------------
+    # 2. DÒNG HEADER (Dòng 1 của Data -> Row 2 của Excel)
+    # --------------------------------------------------------
+    headers = df_data.iloc[0].fillna("").tolist()
+    for col_idx, header_val in enumerate(headers, start=1):
+        cell = ws.cell(row=2, column=col_idx, value=str(header_val))
+        cell.font = Font(name=font_name, size=10, bold=True, color="FFFFFF" if orange_fill.fgColor.rgb == "ED7D00" else "000000")
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         cell.fill = orange_fill
         cell.border = border
+    ws.row_dimensions[2].height = 38
 
-    ws.row_dimensions[1].height = 38
-
+    # --------------------------------------------------------
+    # 3. NỘI DUNG BẢNG (Dòng 2..N của Data -> Row 3..N+1 của Excel)
+    # --------------------------------------------------------
     for r_idx in range(1, num_rows):
-        excel_row = r_idx + 1
+        excel_row = r_idx + 2
         ws.row_dimensions[excel_row].height = 32
         
         for c_idx in range(num_cols):
-            raw_val = df_matrix.iloc[r_idx, c_idx]
-            cell_val = process_cell_bilingual(raw_val)
+            val = df_data.iloc[r_idx, c_idx]
+            val = "" if pd.isna(val) else str(val)
+            
+            # Thử chuyển đổi kiểu số nếu có thể
+            if val.isdigit():
+                val = int(val)
+            else:
+                try:
+                    val = float(val)
+                except ValueError:
+                    pass
 
-            if str(cell_val).isdigit():
-                cell_val = int(cell_val)
-
-            cell = ws.cell(row=excel_row, column=c_idx + 1, value=cell_val)
+            cell = ws.cell(row=excel_row, column=c_idx + 1, value=val)
             cell.font = Font(name=font_name, size=10)
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
             cell.border = border
 
-    for c_idx in range(1, num_cols + 1):
-        col_letter = get_column_letter(c_idx)
-        max_len = 10
+    # --------------------------------------------------------
+    # 4. TỰ ĐỘNG TÍNH VÀ CÀI ĐẶT ĐỘ RỘNG CỘT
+    # --------------------------------------------------------
+    for col_idx in range(1, num_cols + 1):
+        col_letter = get_column_letter(col_idx)
+        # Tính độ dài max của nội dung cột
+        max_len = 12
         for r_idx in range(1, num_rows + 1):
-            val = str(ws.cell(row=r_idx, column=c_idx).value or "")
-            for line in val.split('\n'):
-                if len(line) > max_len:
-                    max_len = len(line)
-        ws.column_dimensions[col_letter].width = min(max_len + 5, 30)
+            cell_val = str(ws.cell(row=r_idx, column=col_idx).value or "")
+            lines = cell_val.split('\n')
+            for l in lines:
+                if len(l) > max_len:
+                    max_len = len(l)
+        ws.column_dimensions[col_letter].width = min(max_len + 5, 40)
 
-    ws.sheet_view.showGridLines = False
-    ws.freeze_panes = "A2"
-    ws.page_setup.orientation = "landscape"
+    # --------------------------------------------------------
+    # 5. CÀI ĐẶT TRANG IN CHUYÊN NGHIỆP
+    # --------------------------------------------------------
+    ws.sheet_view.showGridLines = True
+    ws.freeze_panes = "A3"
+    ws.page_setup.orientation = "landscape" if num_cols > 5 else "portrait"
     ws.page_setup.fitToWidth = 1
     ws.page_setup.fitToHeight = 1
     ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_margins = PageMargins(left=0.2, right=0.2, top=0.3, bottom=0.3, header=0.1, footer=0.1)
 
-    ws.page_margins = PageMargins(
-        left=0.2, right=0.2, top=0.3, bottom=0.3, header=0.1, footer=0.1
-    )
-
+    # Xuất file ra bộ nhớ RAM
     output = io.BytesIO()
     wb.save(output)
     output.seek(0)
     return output
 
 # ============================================================
-# XỬ LÝ DỮ LIỆU & HIỂN THỊ TRÊN STREAMLIT
+# GIAO DIỆN STREAMLIT
 # ============================================================
 
+uploaded_file = st.file_drop_target if hasattr(st, 'file_drop_target') else st.file_uploader(
+    "📂 Tải lên File Ảnh (PNG, JPG) hoặc File Excel (XLSX, CSV)",
+    type=["png", "jpg", "jpeg", "xlsx", "xls", "csv"]
+)
+
+title_input = st.text_input("📝 Tiêu đề bảng Excel:", "BẢNG TỔNG HỢP / 数据汇总表")
+
 if uploaded_file is not None:
-    with st.spinner("⏳ Đang xử lý file..."):
-        df_matrix = read_input_matrix(uploaded_file)
+    file_ext = uploaded_file.name.split('.')[-1].lower()
+    df_data = None
+    
+    with st.spinner("⏳ Đang đọc và phân tích dữ liệu bảng..."):
+        if file_ext in ["png", "jpg", "jpeg"]:
+            df_data = process_image_file(uploaded_file)
+        elif file_ext in ["xlsx", "xls", "csv"]:
+            df_data = process_excel_file(uploaded_file)
 
-    if df_matrix is not None and not df_matrix.empty:
-        r_count, c_count = df_matrix.shape
-        st.success(f"Đã nhận diện file có **{r_count} dòng** và **{c_count} cột**.")
+    if df_data is not None and not df_data.empty:
+        rows_count, cols_count = df_data.shape
+        st.success(f"✅ Đã nhận diện thành công bảng dữ liệu kích thước: **{rows_count} dòng x {cols_count} cột**")
 
-        # ============================================================
-        # HIỂN THỊ PREVIEW DỮ LIỆU TRÊN STREAMLIT
-        # ============================================================
-        st.subheader("📋 Nội dung bảng")
+        st.subheader("📋 Xem trước dữ liệu trích xuất")
+        st.dataframe(df_data, use_container_width=True)
 
-        preview_matrix = df_matrix.copy()
-        for r in range(preview_matrix.shape[0]):
-            for c in range(preview_matrix.shape[1]):
-                preview_matrix.iloc[r, c] = process_cell_bilingual(preview_matrix.iloc[r, c])
-
-        # Đảm bảo danh sách cột không bao giờ bị trùng lặp khi đưa vào st.dataframe
-        raw_headers = list(preview_matrix.iloc[0].values)
-        clean_headers = []
-        seen_headers = {}
-        
-        for idx, h in enumerate(raw_headers):
-            h_str = str(h).strip().replace('\n', ' ') if h else f"Cột {idx + 1}"
-            if h_str in seen_headers:
-                seen_headers[h_str] += 1
-                clean_headers.append(f"{h_str} ({seen_headers[h_str]})")
-            else:
-                seen_headers[h_str] = 0
-                clean_headers.append(h_str)
-
-        preview_df = pd.DataFrame(
-            preview_matrix.iloc[1:].values,
-            columns=clean_headers
-        )
-
-        st.dataframe(
-            preview_df,
-            use_container_width=True,
-            hide_index=True
-        )
-
-        # ============================================================
-        # NÚT TẠO + DOWNLOAD EXCEL
-        # ============================================================
         st.divider()
-        st.subheader("📥 Xuất Excel")
-
-        excel_file = create_excel_dynamic(df_matrix)
-
+        
+        # Nút Tạo & Download
+        excel_bytes = create_dynamic_excel(df_data, title_text=title_input)
+        
         st.download_button(
-            label="⬇️ 下载 Excel / Tải Excel",
-            data=excel_file.getvalue(),
-            file_name=f"Bang_cham_cong_{r_count}x{c_count}_Trung_Viet.xlsx",
+            label="⬇️ Tải xuống File Excel Đã Định Dạng",
+            data=excel_bytes.getvalue(),
+            file_name=f"Bang_Xu_Ly_{rows_count}x{cols_count}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
-
-        st.caption(
-            "Excel được tạo trực tiếp trong bộ nhớ RAM, "
-            "không sử dụng đường dẫn /mnt/data nên phù hợp với Streamlit Cloud."
-        )
     else:
-        st.error("Không thể đọc được bảng từ file này. Vui lòng thử file khác!")
-else:
-    st.info("👆 Vui lòng tải lên 1 file (Ảnh hoặc Excel) để bắt đầu xử lý.")
+        st.error("❌ Không thể trích xuất dữ liệu từ file đã tải lên. Vui lòng kiểm tra lại chất lượng ảnh hoặc định dạng file.")
