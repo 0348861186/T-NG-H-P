@@ -1,9 +1,18 @@
 import io
-import streamlit as st
+import os
+import re
+import tempfile
+from pathlib import Path
 
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.worksheet.page import PageMargins
+import streamlit as st
+import numpy as np
+import cv2
+from PIL import Image, ImageDraw, ImageFont
+
+from openpyxl import load_workbook
+from openpyxl.cell.cell import MergedCell
+
+from deep_translator import GoogleTranslator
 
 
 # ============================================================
@@ -11,489 +20,333 @@ from openpyxl.worksheet.page import PageMargins
 # ============================================================
 
 st.set_page_config(
-    page_title="Bảng chấm công Trung - Việt",
-    page_icon="📊",
-    layout="centered"
+    page_title="Trình dịch Excel & Ảnh Trung - Việt",
+    page_icon="🌐",
+    layout="wide"
 )
 
 
 # ============================================================
-# TIÊU ĐỀ
+# GIAO DIỆN
 # ============================================================
 
-st.title("📊 Bảng chấm công Trung - Việt")
-st.caption("2026年8月26日员工上班 / Nhân viên đi làm ngày 26/08/2026")
+st.title("🌐 Trình dịch Excel & Ảnh Trung - Việt")
 
-
-# ============================================================
-# DỮ LIỆU BẢNG
-# ============================================================
-
-title_cn = "2026 年 8 月 26 日员工上班"
-title_vi = "Nhân viên đi làm ngày 26/08/2026"
-
-
-headers = [
-    ("STT", "STT"),
-    ("部门", "Bộ phận"),
-    ("开几台机", "Số máy mở"),
-    ("正式工", "Công nhân chính thức"),
-    ("临时工", "Công nhân thời vụ"),
-    ("备注", "Ghi chú"),
-]
-
-
-# ------------------------------------------------------------
-# Dữ liệu:
-# STT,
-# (Tiếng Trung, Tiếng Việt),
-# Số máy,
-# Chính thức,
-# Thời vụ,
-# Ghi chú
-# ------------------------------------------------------------
-
-rows = [
-    (1, ("连机", "Máy liên kết"), 5, 3, 2, ""),
-    (2, ("制袋机", "Máy làm túi"), 6, 3, 2, ""),
-    (3, ("连机吹膜", "Thổi màng liên máy"), 5, 4, "", ""),
-    (4, ("制袋机吹膜", "Thổi màng máy làm túi"), 4, 2, 1, ""),
-    (5, ("巡检", "Kiểm tra tuần tra"), "", 2, "", ""),
-    (6, ("打扫", "Vệ sinh"), "", 1, "", ""),
-    (7, ("打箱", "Đóng thùng"), "", 2, "", ""),
-    (8, ("分口", "Chia miệng"), "", 1, 1, ""),
-    (9, ("仓库+材料", "Kho + nguyên liệu"), "", 2, "", ""),
-    (10, ("造粒", "Tạo hạt"), "", 3, 1, ""),
-    (11, ("电工", "Thợ điện"), "", 2, "", ""),
-    (12, ("办公室", "Văn phòng"), "", 4, "", ""),
-    (13, ("QC", "QC"), "", 2, "", ""),
-    (14, ("阿秋，阿勇", "A Qiu, A Yong"), "", 2, "", ""),
-]
+st.caption(
+    "Tự nhận diện file Excel / hình ảnh • OCR • dịch tự động • "
+    "giữ nguyên bố cục tối đa"
+)
 
 
 # ============================================================
-# HÀM TẠO FILE EXCEL
+# SIDEBAR
 # ============================================================
 
-def create_excel():
+st.sidebar.header("⚙️ Cài đặt")
 
-    # --------------------------------------------------------
-    # Tạo workbook
-    # --------------------------------------------------------
+translation_mode = st.sidebar.radio(
+    "Kiểu hiển thị",
+    [
+        "Song ngữ - Trung + Việt",
+        "Chỉ tiếng Việt"
+    ]
+)
 
-    wb = Workbook()
+source_language = st.sidebar.selectbox(
+    "Ngôn ngữ nguồn",
+    [
+        "Tiếng Trung",
+        "Tự động nhận diện"
+    ]
+)
 
-    ws = wb.active
-    ws.title = "Bảng song ngữ"
+target_language = st.sidebar.selectbox(
+    "Ngôn ngữ đích",
+    [
+        "Tiếng Việt",
+        "English"
+    ]
+)
+
+st.sidebar.divider()
+
+st.sidebar.info(
+    "Excel sẽ được xử lý trực tiếp trên workbook gốc để cố gắng "
+    "giữ nguyên định dạng."
+)
 
 
-    # --------------------------------------------------------
-    # FONT
-    # --------------------------------------------------------
+# ============================================================
+# BỘ NHỚ CACHE TRANSLATION
+# ============================================================
 
-    font_name = "Microsoft YaHei"
+if "translation_cache" not in st.session_state:
+    st.session_state.translation_cache = {}
 
 
-    # --------------------------------------------------------
-    # MÀU HEADER
-    # --------------------------------------------------------
+# ============================================================
+# HÀM KIỂM TRA CHUỖI CÓ CHỮ
+# ============================================================
 
-    orange_fill = PatternFill(
-        fill_type="solid",
-        fgColor="ED7D00"
+def contains_text(value):
+    if value is None:
+        return False
+
+    if not isinstance(value, str):
+        return False
+
+    value = value.strip()
+
+    if not value:
+        return False
+
+    return True
+
+
+# ============================================================
+# LOẠI BỎ NHỮNG CHUỖI KHÔNG NÊN DỊCH
+# ============================================================
+
+def should_translate(text):
+    if not contains_text(text):
+        return False
+
+    text = str(text).strip()
+
+    # URL
+    if re.match(r"^(https?|ftp)://", text, re.I):
+        return False
+
+    # Email
+    if re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", text):
+        return False
+
+    # Chỉ là số
+    if re.match(r"^[\d\s.,:/+\-()%]+$", text):
+        return False
+
+    # Công thức Excel
+    if text.startswith("="):
+        return False
+
+    return True
+
+
+# ============================================================
+# DỊCH
+# ============================================================
+
+def translate_text(text, target="vi"):
+    """
+    Dịch text bằng Google Translate thông qua deep-translator.
+    Có cache để không dịch lặp.
+    """
+
+    if not should_translate(text):
+        return text
+
+    original = str(text)
+
+    cache_key = (
+        original,
+        target
     )
 
+    if cache_key in st.session_state.translation_cache:
+        return st.session_state.translation_cache[cache_key]
 
-    # --------------------------------------------------------
-    # BORDER
-    # --------------------------------------------------------
-
-    thin_side = Side(
-        style="thin",
-        color="000000"
-    )
-
-    border = Border(
-        left=thin_side,
-        right=thin_side,
-        top=thin_side,
-        bottom=thin_side
-    )
-
-
-    # ========================================================
-    # TIÊU ĐỀ
-    # ========================================================
-
-    ws.merge_cells("A1:F1")
-
-    ws["A1"] = (
-        f"{title_cn}\n"
-        f"{title_vi}"
-    )
-
-    ws["A1"].font = Font(
-        name=font_name,
-        size=13,
-        bold=True
-    )
-
-    ws["A1"].alignment = Alignment(
-        horizontal="center",
-        vertical="center",
-        wrap_text=True
-    )
-
-    ws.row_dimensions[1].height = 42
-
-
-    # ========================================================
-    # HEADER
-    # ========================================================
-
-    for col, (cn, vi) in enumerate(headers, start=1):
-
-        cell = ws.cell(
-            row=2,
-            column=col
+    try:
+        translator = GoogleTranslator(
+            source="auto",
+            target=target
         )
 
-        # Nếu giống nhau thì chỉ hiển thị 1 lần
-        if cn == vi:
-            cell.value = cn
-        else:
-            cell.value = f"{cn}\n{vi}"
+        result = translator.translate(original)
 
-        cell.font = Font(
-            name=font_name,
-            size=10,
-            bold=True
-        )
+        if result is None:
+            result = original
 
-        cell.alignment = Alignment(
-            horizontal="center",
-            vertical="center",
-            wrap_text=True
-        )
+        result = str(result).strip()
 
-        cell.fill = orange_fill
-        cell.border = border
+        st.session_state.translation_cache[cache_key] = result
 
-    ws.row_dimensions[2].height = 38
+        return result
+
+    except Exception:
+        return original
 
 
-    # ========================================================
-    # DÒNG DỮ LIỆU
-    # ========================================================
+# ============================================================
+# TẠO NỘI DUNG SONG NGỮ
+# ============================================================
 
-    current_row = 3
+def make_translated_text(original, translated):
+    if translation_mode == "Chỉ tiếng Việt":
+        return translated
 
-    for stt, dept, machines, formal, temp, remark in rows:
+    if original.strip() == translated.strip():
+        return original
 
-        # STT
-        ws.cell(
-            row=current_row,
-            column=1,
-            value=stt
-        )
-
-        # Bộ phận
-        ws.cell(
-            row=current_row,
-            column=2,
-            value=f"{dept[0]}\n{dept[1]}"
-        )
-
-        # Số máy
-        ws.cell(
-            row=current_row,
-            column=3,
-            value=machines
-        )
-
-        # Công nhân chính thức
-        ws.cell(
-            row=current_row,
-            column=4,
-            value=formal
-        )
-
-        # Công nhân thời vụ
-        ws.cell(
-            row=current_row,
-            column=5,
-            value=temp
-        )
-
-        # Ghi chú
-        ws.cell(
-            row=current_row,
-            column=6,
-            value=remark
-        )
-
-        # Style
-        for col in range(1, 7):
-
-            cell = ws.cell(
-                row=current_row,
-                column=col
-            )
-
-            cell.font = Font(
-                name=font_name,
-                size=10
-            )
-
-            cell.alignment = Alignment(
-                horizontal="center",
-                vertical="center",
-                wrap_text=True
-            )
-
-            cell.border = border
-
-        ws.row_dimensions[current_row].height = 32
-
-        current_row += 1
+    return f"{original}\n{translated}"
 
 
-    # ========================================================
-    # 2 DÒNG CUỐI:
-    #
-    # 15 临时工
-    # 15 新临时工
-    #
-    # C:E được gộp theo hình ảnh gốc
-    # ========================================================
+# ============================================================
+# PHÂN TÍCH EXTENSION
+# ============================================================
 
-    row_15_old = current_row
-    row_15_new = current_row + 1
+def detect_file_type(filename):
+    ext = Path(filename).suffix.lower()
 
+    excel_extensions = {
+        ".xlsx",
+        ".xlsm",
+        ".xltx",
+        ".xltm",
+        ".xls"
+    }
+
+    image_extensions = {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".bmp",
+        ".tif",
+        ".tiff",
+        ".webp"
+    }
+
+    if ext in excel_extensions:
+        return "excel"
+
+    if ext in image_extensions:
+        return "image"
+
+    return "unknown"
+
+
+# ============================================================
+# ============================================================
+#                    EXCEL PROCESSING
+# ============================================================
+# ============================================================
+
+
+# ============================================================
+# DỊCH EXCEL
+# ============================================================
+
+def translate_excel(uploaded_file):
+    """
+    Mở workbook gốc và dịch trực tiếp các cell chứa text.
+    Không tạo workbook mới.
+    """
+
+    file_bytes = uploaded_file.getvalue()
+
+    filename = uploaded_file.name
+    ext = Path(filename).suffix.lower()
+
+    keep_vba = ext in {".xlsm", ".xltm"}
+
+    input_stream = io.BytesIO(file_bytes)
 
     # --------------------------------------------------------
-    # Dòng 15 - Công nhân thời vụ
+    # XLSX / XLSM / XLTX / XLTM
     # --------------------------------------------------------
 
-    ws.cell(
-        row=row_15_old,
-        column=1,
-        value=15
-    )
-
-    ws.cell(
-        row=row_15_old,
-        column=2,
-        value="临时工\nCông nhân thời vụ"
-    )
-
-
-    # Gộp C:E
-    ws.merge_cells(
-        start_row=row_15_old,
-        start_column=3,
-        end_row=row_15_old,
-        end_column=5
-    )
-
-    ws.cell(
-        row=row_15_old,
-        column=3,
-        value=4
-    )
-
-
-    # --------------------------------------------------------
-    # Dòng 15 - Công nhân thời vụ mới
-    # --------------------------------------------------------
-
-    ws.cell(
-        row=row_15_new,
-        column=1,
-        value=15
-    )
-
-    ws.cell(
-        row=row_15_new,
-        column=2,
-        value="新临时工\nCông nhân thời vụ mới"
-    )
-
-
-    # Gộp C:E
-    ws.merge_cells(
-        start_row=row_15_new,
-        start_column=3,
-        end_row=row_15_new,
-        end_column=5
-    )
-
-    ws.cell(
-        row=row_15_new,
-        column=3,
-        value=2
-    )
-
-
-    # --------------------------------------------------------
-    # Ghi chú 套袋 / Đóng túi
-    # --------------------------------------------------------
-
-    ws.merge_cells(
-        start_row=row_15_old,
-        start_column=6,
-        end_row=row_15_new,
-        end_column=6
-    )
-
-    ws.cell(
-        row=row_15_old,
-        column=6,
-        value="套袋\nĐóng túi"
-    )
-
-
-    # --------------------------------------------------------
-    # Style cho 2 dòng cuối
-    # --------------------------------------------------------
-
-    for row in [row_15_old, row_15_new]:
-
-        ws.row_dimensions[row].height = 36
-
-        for col in range(1, 7):
-
-            cell = ws.cell(
-                row=row,
-                column=col
-            )
-
-            cell.font = Font(
-                name=font_name,
-                size=10
-            )
-
-            cell.alignment = Alignment(
-                horizontal="center",
-                vertical="center",
-                wrap_text=True
-            )
-
-            cell.border = border
-
-
-    # ========================================================
-    # TỔNG CỘNG
-    # ========================================================
-
-    total_row = row_15_new + 1
-
-
-    # Gộp A:B
-    ws.merge_cells(
-        start_row=total_row,
-        start_column=1,
-        end_row=total_row,
-        end_column=2
-    )
-
-    ws.cell(
-        row=total_row,
-        column=1,
-        value="一共\nTổng cộng"
-    )
-
-
-    # Gộp C:E
-    ws.merge_cells(
-        start_row=total_row,
-        start_column=3,
-        end_row=total_row,
-        end_column=5
-    )
-
-    ws.cell(
-        row=total_row,
-        column=3,
-        value=42
-    )
-
-
-    # --------------------------------------------------------
-    # Style tổng
-    # --------------------------------------------------------
-
-    for col in range(1, 7):
-
-        cell = ws.cell(
-            row=total_row,
-            column=col
+    if ext != ".xls":
+        wb = load_workbook(
+            input_stream,
+            keep_vba=keep_vba,
+            data_only=False
         )
 
-        cell.font = Font(
-            name=font_name,
-            size=11,
-            bold=True
+    else:
+        raise ValueError(
+            "File .xls đời cũ không được openpyxl hỗ trợ trực tiếp. "
+            "Hãy lưu file thành .xlsx trước khi upload."
         )
 
-        cell.alignment = Alignment(
-            horizontal="center",
-            vertical="center",
-            wrap_text=True
-        )
+    translated_count = 0
 
-        cell.border = border
+    progress_bar = st.progress(0)
 
-    ws.row_dimensions[total_row].height = 36
+    # Đếm tổng số ô cần xử lý
+    total_cells = 0
 
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
 
-    # ========================================================
-    # ĐỘ RỘNG CỘT
-    # ========================================================
+                if isinstance(cell, MergedCell):
+                    continue
 
-    ws.column_dimensions["A"].width = 8
-    ws.column_dimensions["B"].width = 24
-    ws.column_dimensions["C"].width = 14
-    ws.column_dimensions["D"].width = 17
-    ws.column_dimensions["E"].width = 17
-    ws.column_dimensions["F"].width = 18
+                if should_translate(cell.value):
+                    total_cells += 1
 
+    processed = 0
 
-    # ========================================================
-    # CÀI ĐẶT TRANG IN
-    # ========================================================
+    # --------------------------------------------------------
+    # DỊCH TỪNG SHEET
+    # --------------------------------------------------------
 
-    ws.sheet_view.showGridLines = False
+    for ws in wb.worksheets:
 
-    ws.freeze_panes = "A3"
+        st.write(f"🔄 Đang xử lý sheet: **{ws.title}**")
 
-    ws.page_setup.orientation = "landscape"
+        for row in ws.iter_rows():
 
-    ws.page_setup.fitToWidth = 1
-    ws.page_setup.fitToHeight = 1
+            for cell in row:
 
-    ws.sheet_properties.pageSetUpPr.fitToPage = True
+                if isinstance(cell, MergedCell):
+                    continue
 
-    ws.page_margins = PageMargins(
-        left=0.2,
-        right=0.2,
-        top=0.3,
-        bottom=0.3,
-        header=0.1,
-        footer=0.1
-    )
+                value = cell.value
 
+                if not should_translate(value):
+                    continue
 
-    # ========================================================
-    # GHI WORKBOOK VÀO RAM
-    #
-    # QUAN TRỌNG:
-    # Không dùng:
-    #
-    # wb.save("/mnt/data/...")
-    #
-    # Vì Streamlit Cloud có thể không có thư mục đó.
-    # ========================================================
+                original = str(value)
+
+                translated = translate_text(
+                    original,
+                    target=(
+                        "vi"
+                        if target_language == "Tiếng Việt"
+                        else "en"
+                    )
+                )
+
+                new_value = make_translated_text(
+                    original,
+                    translated
+                )
+
+                cell.value = new_value
+
+                # Giữ wrap text nếu có chữ song ngữ
+                if "\n" in new_value:
+                    current_alignment = cell.alignment.copy(
+                        wrap_text=True
+                    )
+                    cell.alignment = current_alignment
+
+                translated_count += 1
+                processed += 1
+
+                if total_cells > 0:
+                    progress_bar.progress(
+                        min(
+                            processed / total_cells,
+                            1.0
+                        )
+                    )
+
+    progress_bar.progress(1.0)
+
+    # --------------------------------------------------------
+    # GHI RA RAM
+    # --------------------------------------------------------
 
     output = io.BytesIO()
 
@@ -501,106 +354,701 @@ def create_excel():
 
     output.seek(0)
 
-    return output
+    return output, translated_count
 
 
 # ============================================================
-# HIỂN THỊ PREVIEW DỮ LIỆU TRÊN STREAMLIT
+# ============================================================
+#                    OCR IMAGE PROCESSING
+# ============================================================
 # ============================================================
 
-st.subheader("📋 Nội dung bảng")
 
-preview_data = []
+@st.cache_resource
+def load_easyocr():
+    """
+    EasyOCR được load một lần.
+    """
 
-for stt, dept, machines, formal, temp, remark in rows:
+    import easyocr
 
-    preview_data.append(
-        {
-            "STT": stt,
-            "部门 / Bộ phận": f"{dept[0]} / {dept[1]}",
-            "开几台机 / Số máy": machines,
-            "正式工 / Chính thức": formal,
-            "临时工 / Thời vụ": temp,
-        }
+    reader = easyocr.Reader(
+        [
+            "ch_sim",
+            "en"
+        ],
+        gpu=False
     )
 
-preview_data.extend(
-    [
-        {
-            "STT": 15,
-            "部门 / Bộ phận": "临时工 / Công nhân thời vụ",
-            "开几台机 / Số máy": "",
-            "正式工 / Chính thức": "",
-            "临时工 / Thời vụ": 4,
-        },
-        {
-            "STT": 15,
-            "部门 / Bộ phận": "新临时工 / Công nhân thời vụ mới",
-            "开几台机 / Số máy": "",
-            "正式工 / Chính thức": "",
-            "临时工 / Thời vụ": 2,
-        },
-    ]
-)
-
-st.dataframe(
-    preview_data,
-    use_container_width=True,
-    hide_index=True
-)
+    return reader
 
 
 # ============================================================
-# NÚT TẠO + DOWNLOAD EXCEL
+# OCR
+# ============================================================
+
+def perform_ocr(image):
+    reader = load_easyocr()
+
+    image_np = np.array(image)
+
+    result = reader.readtext(
+        image_np,
+        detail=1,
+        paragraph=False
+    )
+
+    return result
+
+
+# ============================================================
+# TÍNH FONT SIZE
+# ============================================================
+
+def estimate_font_size(box):
+    """
+    Ước lượng font theo chiều cao vùng OCR.
+    """
+
+    ys = [point[1] for point in box]
+
+    height = max(ys) - min(ys)
+
+    size = int(height * 0.75)
+
+    size = max(size, 12)
+    size = min(size, 80)
+
+    return size
+
+
+# ============================================================
+# TÌM FONT HỖ TRỢ TIẾNG TRUNG / VIỆT
+# ============================================================
+
+def find_font():
+    possible_fonts = [
+        # Windows
+        r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\msyhbd.ttc",
+        r"C:\Windows\Fonts\simhei.ttf",
+        r"C:\Windows\Fonts\arial.ttf",
+
+        # Linux
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.otf",
+
+        # macOS
+        "/System/Library/Fonts/PingFang.ttc"
+    ]
+
+    for font_path in possible_fonts:
+        if os.path.exists(font_path):
+            return font_path
+
+    return None
+
+
+# ============================================================
+# TEXT BOX
+# ============================================================
+
+def get_box_coordinates(box):
+    xs = [int(point[0]) for point in box]
+    ys = [int(point[1]) for point in box]
+
+    return (
+        min(xs),
+        min(ys),
+        max(xs),
+        max(ys)
+    )
+
+
+# ============================================================
+# INPAINT VÙNG CHỮ
+# ============================================================
+
+def remove_text_background(image_np, rectangle):
+    """
+    Xóa chữ cũ bằng OpenCV inpainting.
+    """
+
+    x1, y1, x2, y2 = rectangle
+
+    h, w = image_np.shape[:2]
+
+    x1 = max(0, x1)
+    y1 = max(0, y1)
+    x2 = min(w - 1, x2)
+    y2 = min(h - 1, y2)
+
+    mask = np.zeros(
+        (h, w),
+        dtype=np.uint8
+    )
+
+    # Nới vùng mask một chút
+    padding = 3
+
+    mx1 = max(0, x1 - padding)
+    my1 = max(0, y1 - padding)
+    mx2 = min(w - 1, x2 + padding)
+    my2 = min(h - 1, y2 + padding)
+
+    cv2.rectangle(
+        mask,
+        (mx1, my1),
+        (mx2, my2),
+        255,
+        -1
+    )
+
+    result = cv2.inpaint(
+        image_np,
+        mask,
+        3,
+        cv2.INPAINT_TELEA
+    )
+
+    return result
+
+
+# ============================================================
+# VẼ TEXT DỊCH
+# ============================================================
+
+def draw_text_inside_box(
+    image,
+    text,
+    rectangle,
+    font_path
+):
+    """
+    Vẽ text dịch vào đúng vùng OCR.
+    """
+
+    draw = ImageDraw.Draw(image)
+
+    x1, y1, x2, y2 = rectangle
+
+    box_width = max(
+        20,
+        x2 - x1
+    )
+
+    box_height = max(
+        20,
+        y2 - y1
+    )
+
+    font_size = max(
+        12,
+        min(
+            estimate_font_size(
+                [
+                    (x1, y1),
+                    (x2, y1),
+                    (x2, y2),
+                    (x1, y2)
+                ]
+            ),
+            60
+        )
+    )
+
+    # --------------------------------------------------------
+    # Load font
+    # --------------------------------------------------------
+
+    try:
+
+        if font_path:
+            font = ImageFont.truetype(
+                font_path,
+                font_size
+            )
+
+        else:
+            font = ImageFont.load_default()
+
+    except Exception:
+
+        font = ImageFont.load_default()
+
+    # --------------------------------------------------------
+    # Text wrapping
+    # --------------------------------------------------------
+
+    words = text.split()
+
+    lines = []
+
+    current = ""
+
+    for word in words:
+
+        test = (
+            word
+            if not current
+            else current + " " + word
+        )
+
+        bbox = draw.textbbox(
+            (0, 0),
+            test,
+            font=font
+        )
+
+        width = bbox[2] - bbox[0]
+
+        if width <= box_width:
+
+            current = test
+
+        else:
+
+            if current:
+                lines.append(current)
+
+            current = word
+
+    if current:
+        lines.append(current)
+
+    if not lines:
+        lines = [text]
+
+    # --------------------------------------------------------
+    # Giảm font nếu quá cao
+    # --------------------------------------------------------
+
+    while len(lines) * (font_size + 4) > box_height and font_size > 8:
+
+        font_size -= 1
+
+        try:
+
+            if font_path:
+                font = ImageFont.truetype(
+                    font_path,
+                    font_size
+                )
+
+            else:
+                font = ImageFont.load_default()
+
+        except Exception:
+
+            break
+
+    # --------------------------------------------------------
+    # Vẽ
+    # --------------------------------------------------------
+
+    total_height = len(lines) * (
+        font_size + 4
+    )
+
+    start_y = y1 + max(
+        0,
+        (box_height - total_height) // 2
+    )
+
+    for line in lines:
+
+        bbox = draw.textbbox(
+            (0, 0),
+            line,
+            font=font
+        )
+
+        text_width = bbox[2] - bbox[0]
+
+        x = x1 + max(
+            0,
+            (box_width - text_width) // 2
+        )
+
+        draw.text(
+            (x, start_y),
+            line,
+            font=font,
+            fill=(0, 0, 0)
+        )
+
+        start_y += font_size + 4
+
+    return image
+
+
+# ============================================================
+# DỊCH ẢNH
+# ============================================================
+
+def translate_image(uploaded_file):
+    """
+    OCR -> dịch -> thay chữ.
+    """
+
+    original_bytes = uploaded_file.getvalue()
+
+    image = Image.open(
+        io.BytesIO(original_bytes)
+    ).convert("RGB")
+
+    original_size = image.size
+
+    st.write(
+        f"📐 Kích thước ảnh gốc: "
+        f"**{original_size[0]} × {original_size[1]} px**"
+    )
+
+    # --------------------------------------------------------
+    # OCR
+    # --------------------------------------------------------
+
+    with st.spinner("🔍 Đang nhận diện chữ trong ảnh..."):
+
+        ocr_results = perform_ocr(image)
+
+    st.write(
+        f"🔎 Phát hiện **{len(ocr_results)}** vùng chữ."
+    )
+
+    if not ocr_results:
+
+        return (
+            io.BytesIO(original_bytes),
+            0
+        )
+
+    # --------------------------------------------------------
+    # Chuyển sang OpenCV
+    # --------------------------------------------------------
+
+    image_np = np.array(image)
+
+    # --------------------------------------------------------
+    # Xử lý từng vùng
+    # --------------------------------------------------------
+
+    progress = st.progress(0)
+
+    font_path = find_font()
+
+    processed = 0
+
+    for index, item in enumerate(ocr_results):
+
+        try:
+
+            box = item[0]
+            original_text = str(item[1]).strip()
+            confidence = float(item[2])
+
+        except Exception:
+            continue
+
+        # Bỏ OCR quá thấp
+        if confidence < 0.25:
+            continue
+
+        if not should_translate(original_text):
+            continue
+
+        # ----------------------------------------------------
+        # Dịch
+        # ----------------------------------------------------
+
+        translated = translate_text(
+            original_text,
+            target=(
+                "vi"
+                if target_language == "Tiếng Việt"
+                else "en"
+            )
+        )
+
+        # ----------------------------------------------------
+        # Nội dung cuối
+        # ----------------------------------------------------
+
+        if translation_mode == "Song ngữ - Trung + Việt":
+
+            display_text = translated
+
+        else:
+
+            display_text = translated
+
+        rectangle = get_box_coordinates(box)
+
+        # ----------------------------------------------------
+        # Xóa chữ gốc
+        # ----------------------------------------------------
+
+        image_np = remove_text_background(
+            image_np,
+            rectangle
+        )
+
+        # ----------------------------------------------------
+        # Convert PIL
+        # ----------------------------------------------------
+
+        image = Image.fromarray(
+            cv2.cvtColor(
+                image_np,
+                cv2.COLOR_BGR2RGB
+            )
+        )
+
+        # ----------------------------------------------------
+        # Vẽ chữ mới
+        # ----------------------------------------------------
+
+        image = draw_text_inside_box(
+            image,
+            display_text,
+            rectangle,
+            font_path
+        )
+
+        processed += 1
+
+        progress.progress(
+            min(
+                (index + 1) / len(ocr_results),
+                1.0
+            )
+        )
+
+    # --------------------------------------------------------
+    # Xuất ảnh
+    # --------------------------------------------------------
+
+    output = io.BytesIO()
+
+    output_format = "PNG"
+
+    image.save(
+        output,
+        format=output_format
+    )
+
+    output.seek(0)
+
+    return output, processed
+
+
+# ============================================================
+# ============================================================
+#                       UPLOAD
+# ============================================================
 # ============================================================
 
 st.divider()
 
-st.subheader("📥 Xuất Excel")
+st.subheader("📤 Tải file cần dịch")
 
-if st.button(
-    "🔄 Tạo file Excel",
-    use_container_width=True
-):
+uploaded_file = st.file_uploader(
+    "Chọn file Excel hoặc hình ảnh",
+    type=[
+        "xlsx",
+        "xlsm",
+        "xltx",
+        "xltm",
+        "xls",
+        "png",
+        "jpg",
+        "jpeg",
+        "bmp",
+        "tif",
+        "tiff",
+        "webp"
+    ]
+)
 
-    excel_file = create_excel()
 
-    st.download_button(
-        label="⬇️ 下载 Excel / Tải Excel",
-        data=excel_file.getvalue(),
-        file_name="Bang_cham_cong_2026-08-26_Trung_Viet.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True
+# ============================================================
+# XỬ LÝ
+# ============================================================
+
+if uploaded_file:
+
+    file_type = detect_file_type(
+        uploaded_file.name
     )
 
     st.success(
-        "Đã tạo file Excel thành công! "
-        "Nhấn nút '⬇️ 下载 Excel / Tải Excel' để tải xuống."
+        f"📄 File: **{uploaded_file.name}**"
     )
 
+    if file_type == "excel":
 
-# ============================================================
-# NÚT DOWNLOAD LUÔN HIỂN THỊ
-# ============================================================
+        st.info(
+            "📊 Đã nhận diện đây là file Excel."
+        )
 
-else:
+        if st.button(
+            "🚀 DỊCH FILE EXCEL",
+            use_container_width=True
+        ):
 
-    excel_file = create_excel()
+            try:
 
-    st.download_button(
-        label="⬇️ 下载 Excel / Tải Excel",
-        data=excel_file.getvalue(),
-        file_name="Bang_cham_cong_2026-08-26_Trung_Viet.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True
-    )
+                with st.spinner(
+                    "⏳ Đang dịch Excel..."
+                ):
+
+                    output, count = translate_excel(
+                        uploaded_file
+                    )
+
+                st.success(
+                    f"✅ Hoàn thành! Đã xử lý "
+                    f"**{count} ô chứa văn bản**."
+                )
+
+                original_ext = Path(
+                    uploaded_file.name
+                ).suffix.lower()
+
+                if original_ext in {
+                    ".xlsm",
+                    ".xltm"
+                }:
+
+                    output_name = (
+                        Path(uploaded_file.name).stem
+                        + "_Trung_Viet"
+                        + original_ext
+                    )
+
+                    mime = (
+                        "application/vnd.ms-excel."
+                        "sheet.macroEnabled.12"
+                    )
+
+                else:
+
+                    output_name = (
+                        Path(uploaded_file.name).stem
+                        + "_Trung_Viet.xlsx"
+                    )
+
+                    mime = (
+                        "application/vnd.openxmlformats-"
+                        "officedocument.spreadsheetml.sheet"
+                    )
+
+                st.download_button(
+                    label="⬇️ TẢI FILE EXCEL ĐÃ DỊCH",
+                    data=output.getvalue(),
+                    file_name=output_name,
+                    mime=mime,
+                    use_container_width=True
+                )
+
+            except Exception as e:
+
+                st.error(
+                    "❌ Không thể xử lý file Excel."
+                )
+
+                st.exception(e)
+
+    elif file_type == "image":
+
+        st.info(
+            "🖼️ Đã nhận diện đây là file hình ảnh."
+        )
+
+        # ----------------------------------------------------
+        # Preview
+        # ----------------------------------------------------
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+
+            st.subheader("Ảnh gốc")
+
+            st.image(
+                uploaded_file,
+                use_container_width=True
+            )
+
+        # ----------------------------------------------------
+        # Button
+        # ----------------------------------------------------
+
+        if st.button(
+            "🚀 DỊCH HÌNH ẢNH",
+            use_container_width=True
+        ):
+
+            try:
+
+                output, count = translate_image(
+                    uploaded_file
+                )
+
+                st.success(
+                    f"✅ Hoàn thành! Đã xử lý "
+                    f"**{count} vùng chữ**."
+                )
+
+                with col2:
+
+                    st.subheader(
+                        "Ảnh sau khi dịch"
+                    )
+
+                    st.image(
+                        output.getvalue(),
+                        use_container_width=True
+                    )
+
+                output_name = (
+                    Path(
+                        uploaded_file.name
+                    ).stem
+                    + "_Trung_Viet.png"
+                )
+
+                st.download_button(
+                    label="⬇️ TẢI ẢNH ĐÃ DỊCH",
+                    data=output.getvalue(),
+                    file_name=output_name,
+                    mime="image/png",
+                    use_container_width=True
+                )
+
+            except Exception as e:
+
+                st.error(
+                    "❌ Không thể xử lý hình ảnh."
+                )
+
+                st.exception(e)
+
+    else:
+
+        st.error(
+            "❌ Định dạng file chưa được hỗ trợ."
+        )
 
 
 # ============================================================
 # THÔNG TIN
 # ============================================================
 
+st.divider()
+
 st.caption(
-    "Excel được tạo trực tiếp trong bộ nhớ RAM, "
-    "không sử dụng đường dẫn /mnt/data nên phù hợp với Streamlit Cloud."
+    "Ứng dụng xử lý file trực tiếp trong bộ nhớ RAM. "
+    "Không cần lưu file đầu ra vào /mnt/data."
 )
