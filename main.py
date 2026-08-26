@@ -70,11 +70,9 @@ def process_cell_bilingual(val):
 
     # Nếu có tiếng Trung
     if is_chinese(val_str):
-        # Nếu đã có dấu xuống dòng (đã là dạng Trung\nViệt) thì giữ nguyên
         if "\n" in val_str:
             return val_str
         
-        # Dịch và ghép tiếng Việt xuống dòng dưới
         vi_text = translate_zh_to_vi(val_str)
         if vi_text and vi_text.lower() != val_str.lower():
             return f"{val_str}\n{vi_text}"
@@ -94,20 +92,17 @@ def read_input_matrix(file_obj):
     """Đọc dữ liệu từ file load lên thành ma trận (DataFrame)"""
     file_ext = file_obj.name.split('.')[-1].lower()
     
-    # 1. Nếu là file Excel / CSV
     if file_ext in ['xlsx', 'xls']:
         return pd.read_excel(file_obj, header=None)
     elif file_ext == 'csv':
         return pd.read_csv(file_obj, header=None)
     
-    # 2. Nếu là file Ảnh (dùng OCR nhận diện ma trận dòng x cột)
     elif file_ext in ['png', 'jpg', 'jpeg']:
         reader = load_ocr_reader()
         results = reader.readtext(file_obj.getvalue())
         if not results:
             return None
         
-        # Nhóm chữ theo dòng dựa trên tọa độ Y
         results_sorted = sorted(results, key=lambda x: x[0][0][1])
         lines, current_line, last_y = [], [], None
         
@@ -149,9 +144,6 @@ def create_excel_dynamic(df_matrix):
 
     num_rows, num_cols = df_matrix.shape
 
-    # --------------------------------------------------------
-    # HEADER (Dòng 1 của file load lên)
-    # --------------------------------------------------------
     for c_idx in range(num_cols):
         raw_val = df_matrix.iloc[0, c_idx]
         cell_val = process_cell_bilingual(raw_val)
@@ -164,9 +156,6 @@ def create_excel_dynamic(df_matrix):
 
     ws.row_dimensions[1].height = 38
 
-    # --------------------------------------------------------
-    # CÁC DÒNG DỮ LIỆU (Từ dòng 2 trở đi)
-    # --------------------------------------------------------
     for r_idx in range(1, num_rows):
         excel_row = r_idx + 1
         ws.row_dimensions[excel_row].height = 32
@@ -175,7 +164,6 @@ def create_excel_dynamic(df_matrix):
             raw_val = df_matrix.iloc[r_idx, c_idx]
             cell_val = process_cell_bilingual(raw_val)
 
-            # Đổi sang số nếu giá trị là số nguyên
             if str(cell_val).isdigit():
                 cell_val = int(cell_val)
 
@@ -184,9 +172,6 @@ def create_excel_dynamic(df_matrix):
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
             cell.border = border
 
-    # --------------------------------------------------------
-    # ĐỘ RỘNG CỘT TỰ ĐỘNG THEO KÍCH THƯỚC FILE
-    # --------------------------------------------------------
     for c_idx in range(1, num_cols + 1):
         col_letter = get_column_letter(c_idx)
         max_len = 10
@@ -197,9 +182,6 @@ def create_excel_dynamic(df_matrix):
                     max_len = len(line)
         ws.column_dimensions[col_letter].width = min(max_len + 5, 30)
 
-    # --------------------------------------------------------
-    # CÀI ĐẶT TRANG IN GIỮ NGUYÊN CỦA CODE GỐC
-    # --------------------------------------------------------
     ws.sheet_view.showGridLines = False
     ws.freeze_panes = "A2"
     ws.page_setup.orientation = "landscape"
@@ -233,16 +215,28 @@ if uploaded_file is not None:
         # ============================================================
         st.subheader("📋 Nội dung bảng")
 
-        # Tạo dữ liệu xem trước song ngữ
         preview_matrix = df_matrix.copy()
         for r in range(preview_matrix.shape[0]):
             for c in range(preview_matrix.shape[1]):
                 preview_matrix.iloc[r, c] = process_cell_bilingual(preview_matrix.iloc[r, c])
 
-        # Đặt dòng đầu tiên làm tên cột xem trước
+        # Đảm bảo danh sách cột không bao giờ bị trùng lặp khi đưa vào st.dataframe
+        raw_headers = list(preview_matrix.iloc[0].values)
+        clean_headers = []
+        seen_headers = {}
+        
+        for idx, h in enumerate(raw_headers):
+            h_str = str(h).strip().replace('\n', ' ') if h else f"Cột {idx + 1}"
+            if h_str in seen_headers:
+                seen_headers[h_str] += 1
+                clean_headers.append(f"{h_str} ({seen_headers[h_str]})")
+            else:
+                seen_headers[h_str] = 0
+                clean_headers.append(h_str)
+
         preview_df = pd.DataFrame(
             preview_matrix.iloc[1:].values,
-            columns=preview_matrix.iloc[0].values
+            columns=clean_headers
         )
 
         st.dataframe(
