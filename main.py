@@ -8,7 +8,7 @@ from PIL import Image
 import streamlit as st
 from deep_translator import GoogleTranslator
 
-# Tùy chỉnh cấu hình trang Streamlit
+# Cấu hình trang Streamlit
 st.set_page_config(
     page_title="Dịch Bảng Song Ngữ Trung - Việt",
     page_icon="📊",
@@ -17,27 +17,21 @@ st.set_page_config(
 
 st.title("📊 Ứng Dụng Dịch Bảng Song Ngữ (Trung ↔ Việt)")
 st.write(
-    "Tải lên file **Excel** hoặc **Ảnh bảng biểu**. Hệ thống sẽ dịch và trình bày dạng song ngữ (Dòng dịch nằm ngay dưới dòng gốc trong cùng 1 ô)."
+    "Tải lên file **Excel** hoặc **File Ảnh**. Hệ thống sẽ dịch và trình bày dạng song ngữ (Dòng tiếng Việt/Trung dịch nằm ngay bên dưới dòng gốc)."
 )
 
 
-# ---------------------------------------------------------
-# HÀM CACHE KHỞI TẠO EASYOCR (Đã sửa lỗi xung đột ngôn ngữ)
-# ---------------------------------------------------------
+# Cache bộ đọc OCR để tối ưu RAM Streamlit Cloud
 @st.cache_resource
 def load_ocr_reader(chinese_type):
     import easyocr
 
-    # Chọn đúng mã ngôn ngữ để không bị xung đột với EasyOCR
     lang_code = "ch_sim" if chinese_type == "Giản thể (ch_sim)" else "ch_tra"
     return easyocr.Reader([lang_code, "en"], download_enabled=True)
 
 
-# ---------------------------------------------------------
-# HÀM BỔ TRỢ DỊCH THUẬT VÀ XỬ LÝ DỮ LIỆU
-# ---------------------------------------------------------
+# Hàm dịch văn bản
 def translate_text(text, src_lang, target_lang):
-    """Dịch chuỗi văn bản bằng Google Translator (miễn phí)."""
     if not text or pd.isna(text):
         return ""
     text_str = str(text).strip()
@@ -54,13 +48,14 @@ def translate_text(text, src_lang, target_lang):
         return text_str
 
 
+# Tạo nội dung song ngữ: Dòng gốc \n Dòng dịch
 def process_bilingual_cell(original_val, src_lang, target_lang):
-    """Tạo nội dung song ngữ cho ô: Dòng gốc \n Dòng dịch."""
     if not original_val or pd.isna(original_val):
         return ""
 
     val_str = str(original_val).strip()
 
+    # Nếu không phải chữ cái hay chữ Hán thì giữ nguyên (ví dụ: số 1, 2, 3...)
     if not re.search(r"[\u4e00-\u9fff a-zA-Zà-ỹÀ-Ỹ]", val_str):
         return val_str
 
@@ -69,11 +64,12 @@ def process_bilingual_cell(original_val, src_lang, target_lang):
     if val_str.lower() == translated_val.lower():
         return val_str
 
+    # Ghép dòng gốc và dòng dịch bằng ký tự xuống dòng
     return f"{val_str}\n{translated_val}"
 
 
+# Tạo File Excel chuẩn định dạng xuống dòng và viền bảng
 def create_styled_excel(df_bilingual):
-    """Tạo file Excel (.xlsx) với định dạng bảng đẹp mắt, tự động xuống dòng."""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Bảng Song Ngữ"
@@ -117,10 +113,10 @@ def create_styled_excel(df_bilingual):
                 for line in lines:
                     if len(line) > max_len:
                         max_len = len(line)
-        ws.column_dimensions[col_letter].width = max(max_len + 6, 12)
+        ws.column_dimensions[col_letter].width = max(max_len + 6, 14)
 
     for row in ws.iter_rows():
-        ws.row_dimensions[row[0].row].height = 38
+        ws.row_dimensions[row[0].row].height = 40
 
     output = io.BytesIO()
     wb.save(output)
@@ -128,8 +124,28 @@ def create_styled_excel(df_bilingual):
     return output
 
 
+# Hàm hiển thị Bảng HTML trên Streamlit hỗ trợ xuống dòng \n chuẩn
+def display_html_table(df):
+    html = '<table style="width:100%; border-collapse: collapse; text-align: center; font-family: Arial;">'
+    for r_idx, row in enumerate(df.values):
+        html += "<tr>"
+        for val in row:
+            val_str = (
+                str(val).replace("\n", "<br>")
+                if pd.notna(val) and val != ""
+                else ""
+            )
+            if r_idx == 0:
+                html += f'<th style="border: 1px solid #333; padding: 8px; background-color: #E67E22; color: white; font-weight: bold;">{val_str}</th>'
+            else:
+                html += f'<td style="border: 1px solid #ccc; padding: 8px;">{val_str}</td>'
+        html += "</tr>"
+    html += "</table>"
+    st.markdown(html, unsafe_allow_html=True)
+
+
 # ---------------------------------------------------------
-# GIAO DIỆN VÀ XỬ LÝ CHÍNH (STREAMLIT SIDEBAR & BODY)
+# STREAMLIT UI
 # ---------------------------------------------------------
 st.sidebar.header("⚙️ Cấu hình Dịch")
 direction = st.sidebar.selectbox(
@@ -141,7 +157,7 @@ direction = st.sidebar.selectbox(
 )
 
 chinese_type = st.sidebar.selectbox(
-    "Loại chữ Trung trong ảnh (chỉ dành cho file Ảnh):",
+    "Loại chữ Trung trong ảnh (dành cho file Ảnh):",
     ["Giản thể (ch_sim)", "Phồn thể (ch_tra)"],
 )
 
@@ -157,14 +173,12 @@ if uploaded_file is not None:
     file_type = uploaded_file.name.split(".")[-1].lower()
     df_raw = None
 
-    # 1. Xử lý File Excel
     if file_type in ["xlsx", "xls"]:
-        st.info("📂 Đã nhận file Excel. Đang tải dữ liệu...")
+        st.info("📂 Đã nhận file Excel.")
         df_raw = pd.read_excel(uploaded_file, header=None)
 
-    # 2. Xử lý File Ảnh bằng OCR
     elif file_type in ["png", "jpg", "jpeg"]:
-        st.info("🖼️ Đã nhận file Ảnh. Đang trích xuất dữ liệu bằng OCR...")
+        st.info("🖼️ Đã nhận file Ảnh. Đang quét chữ...")
         try:
             import numpy as np
 
@@ -197,17 +211,16 @@ if uploaded_file is not None:
 
                 df_raw = pd.DataFrame(lines)
             else:
-                st.error("Không tìm thấy chữ trong ảnh!")
+                st.error("Không phát hiện được chữ trong ảnh!")
         except Exception as e:
             st.error(f"Lỗi khi xử lý ảnh: {e}")
 
-    # 3. Tiến hành dịch và xuất kết quả
     if df_raw is not None and not df_raw.empty:
-        st.subheader("📋 Bảng dữ liệu trích xuất")
+        st.subheader("📋 Bảng dữ liệu gốc nhận diện được")
         st.dataframe(df_raw)
 
         if st.button("🚀 Tiến hành Dịch Song Ngữ"):
-            with st.spinner("Đang xử lý dịch toàn bộ bảng..."):
+            with st.spinner("Đang dịch dữ liệu..."):
                 df_bilingual = df_raw.copy()
 
                 for r in range(df_raw.shape[0]):
@@ -217,14 +230,15 @@ if uploaded_file is not None:
                             cell_val, src_lang, target_lang
                         )
 
-                st.success("✅ Dịch thành công!")
+                st.success("✅ Dịch hoàn tất!")
 
-                st.subheader("✨ Xem trước kết quả:")
-                st.dataframe(df_bilingual)
+                st.subheader("✨ Kết quả hiển thị Song Ngữ (Xem trước):")
+                # Hiển thị trực tiếp bảng song ngữ xuống dòng dạng HTML
+                display_html_table(df_bilingual)
 
-                # Xuất ra File Excel
+                st.write("")
+                # Tải file Excel có định dạng chuẩn
                 excel_bytes = create_styled_excel(df_bilingual)
-
                 st.download_button(
                     label="📥 Tải xuống File Excel Song Ngữ",
                     data=excel_bytes,
