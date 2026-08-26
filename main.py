@@ -22,14 +22,15 @@ st.write(
 
 
 # ---------------------------------------------------------
-# HÀM CACHE KHỞI TẠO EASYOCR (Tối ưu RAM trên Streamlit Cloud)
+# HÀM CACHE KHỞI TẠO EASYOCR (Đã sửa lỗi xung đột ngôn ngữ)
 # ---------------------------------------------------------
 @st.cache_resource
-def load_ocr_reader():
+def load_ocr_reader(chinese_type):
     import easyocr
 
-    # "ch_sim": Tiếng Trung Giản thể, "ch_tra": Tiếng Trung Phồn thể, "en": Tiếng Anh/Số
-    return easyocr.Reader(["ch_sim", "ch_tra", "en"], download_enabled=True)
+    # Chọn đúng mã ngôn ngữ để không bị xung đột với EasyOCR
+    lang_code = "ch_sim" if chinese_type == "Giản thể (ch_sim)" else "ch_tra"
+    return easyocr.Reader([lang_code, "en"], download_enabled=True)
 
 
 # ---------------------------------------------------------
@@ -41,7 +42,6 @@ def translate_text(text, src_lang, target_lang):
         return ""
     text_str = str(text).strip()
 
-    # Nếu chỉ là số hoặc ô rỗng thì không dịch
     if not text_str or text_str.isdigit():
         return text_str
 
@@ -61,17 +61,14 @@ def process_bilingual_cell(original_val, src_lang, target_lang):
 
     val_str = str(original_val).strip()
 
-    # Nếu không chứa chữ cái (Việt/Anh) hoặc chữ Hán thì giữ nguyên
     if not re.search(r"[\u4e00-\u9fff a-zA-Zà-ỹÀ-Ỹ]", val_str):
         return val_str
 
     translated_val = translate_text(val_str, src_lang, target_lang)
 
-    # Nếu kết quả dịch trùng văn bản gốc thì giữ nguyên 1 dòng
     if val_str.lower() == translated_val.lower():
         return val_str
 
-    # Trả về chuỗi song ngữ: Gốc + Xuống dòng + Dịch
     return f"{val_str}\n{translated_val}"
 
 
@@ -81,7 +78,6 @@ def create_styled_excel(df_bilingual):
     ws = wb.active
     ws.title = "Bảng Song Ngữ"
 
-    # Định dạng viền ô và màu sắc
     thin_border = Border(
         left=Side(style="thin", color="000000"),
         right=Side(style="thin", color="000000"),
@@ -91,14 +87,13 @@ def create_styled_excel(df_bilingual):
 
     header_fill = PatternFill(
         start_color="E67E22", end_color="E67E22", fill_type="solid"
-    )  # Màu cam tiêu đề
+    )
     header_font = Font(name="Arial", size=10, bold=True, color="FFFFFF")
     cell_font = Font(name="Arial", size=10)
     align_center = Alignment(
         horizontal="center", vertical="center", wrap_text=True
     )
 
-    # Ghi dữ liệu vào sheet
     for r_idx, row in enumerate(
         df_bilingual.itertuples(index=False), start=1
     ):
@@ -107,14 +102,12 @@ def create_styled_excel(df_bilingual):
             cell.border = thin_border
             cell.alignment = align_center
 
-            # Định dạng hàng tiêu đề (Dòng 1)
             if r_idx == 1:
                 cell.fill = header_fill
                 cell.font = header_font
             else:
                 cell.font = cell_font
 
-    # Tự động căn chỉnh độ rộng cột
     for col in ws.columns:
         max_len = 0
         col_letter = get_column_letter(col[0].column)
@@ -126,7 +119,6 @@ def create_styled_excel(df_bilingual):
                         max_len = len(line)
         ws.column_dimensions[col_letter].width = max(max_len + 6, 12)
 
-    # Cài đặt độ cao mặc định cho dòng để vừa 2 dòng chữ
     for row in ws.iter_rows():
         ws.row_dimensions[row[0].row].height = 38
 
@@ -146,6 +138,11 @@ direction = st.sidebar.selectbox(
         "Trung sang Việt (Chinese -> Vietnamese)",
         "Việt sang Trung (Vietnamese -> Chinese)",
     ],
+)
+
+chinese_type = st.sidebar.selectbox(
+    "Loại chữ Trung trong ảnh (chỉ dành cho file Ảnh):",
+    ["Giản thể (ch_sim)", "Phồn thể (ch_tra)"],
 )
 
 src_lang = "zh-CN" if "Trung sang Việt" in direction else "vi"
@@ -174,12 +171,11 @@ if uploaded_file is not None:
             image = Image.open(uploaded_file)
             st.image(image, caption="Ảnh gốc tải lên", use_container_width=True)
 
-            reader = load_ocr_reader()
+            reader = load_ocr_reader(chinese_type)
             img_np = np.array(image)
             results = reader.readtext(img_np)
 
             if results:
-                # Phân nhóm chữ theo dòng dựa trên vị trí Y
                 sorted_res = sorted(results, key=lambda x: x[0][0][1])
                 lines = []
                 curr_line = []
