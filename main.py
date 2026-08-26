@@ -1,136 +1,135 @@
-import streamlit as st
-import pandas as pd
-import easyocr
-import numpy as np
-from deep_translator import GoogleTranslator
-from PIL import Image, ImageDraw, ImageFont
-import io
-import openpyxl
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.page import PageMargins
 
-# 1. Cấu hình ứng dụng
-st.set_page_config(page_title="Dịch Song Ngữ Trung - Việt", layout="wide")
-st.title("🌐 Dịch Song Ngữ Trung - Việt")
+out = "/mnt/data/Bang_cham_cong_2026-08-26_Trung_Viet.xlsx"
 
-# Cache bộ đọc OCR
-@st.cache_resource
-def get_ocr_reader(lang_tuple):
-    return easyocr.Reader(list(lang_tuple), gpu=False)
+wb = Workbook()
+ws = wb.active
+ws.title = "Bảng song ngữ"
 
-# Hàm dịch an toàn chống văng ứng dụng
-def safe_translate(text, source_lang, target_lang):
-    cleaned_text = str(text).strip()
-    if not cleaned_text or cleaned_text.isnumeric():
-        return cleaned_text
-    try:
-        translated = GoogleTranslator(source=source_lang, target=target_lang).translate(cleaned_text)
-        return translated if translated else cleaned_text
-    except Exception:
-        return cleaned_text
+# --- Data translated Chinese -> Vietnamese ---
+title_cn = "2026 年 8 月 26 日员工上班"
+title_vi = "Nhân viên đi làm ngày 26/08/2026"
 
-# Định dạng nội dung: Tiếng Trung luôn ở BÊN TRÊN, Tiếng Việt ở NGAY BÊN DƯỚI
-def format_bilingual(text, mode):
-    if not str(text).strip():
-        return text
-    
-    if mode == "Trung - Việt":
-        # Nguồn: Tiếng Trung, Đích: Tiếng Việt
-        trans = safe_translate(text, 'zh-CN', 'vi')
-        return f"{text}\n{trans}"
-    else:
-        # Nguồn: Tiếng Việt, Đích: Tiếng Trung
-        trans = safe_translate(text, 'vi', 'zh-CN')
-        return f"{trans}\n{text}"
+headers = [
+    ("STT", "STT"),
+    ("部门", "Bộ phận"),
+    ("开几台机", "Số máy mở"),
+    ("正式工", "Công nhân chính thức"),
+    ("临时工", "Công nhân thời vụ"),
+    ("备注", "Ghi chú"),
+]
 
-# 2. Sidebar Tải file và Cấu hình
-st.sidebar.header("Tải File")
-uploaded_file = st.sidebar.file_uploader(
-    "Chọn file Ảnh (PNG, JPG) hoặc Excel (XLSX)", 
-    type=["png", "jpg", "jpeg", "xlsx"]
-)
+rows = [
+    (1, ("连机", "Máy liên kết"), 5, 3, 2, ""),
+    (2, ("制袋机", "Máy làm túi"), 6, 3, 2, ""),
+    (3, ("连机吹膜", "Thổi màng liên máy"), 5, 4, "", ""),
+    (4, ("制袋机吹膜", "Thổi màng máy làm túi"), 4, 2, 1, ""),
+    (5, ("巡检", "Kiểm tra tuần tra"), "", 2, "", ""),
+    (6, ("打扫", "Vệ sinh"), "", 1, "", ""),
+    (7, ("打箱", "Đóng thùng"), "", 2, "", ""),
+    (8, ("分口", "Chia miệng"), "", 1, 1, ""),
+    (9, ("仓库+材料", "Kho + nguyên liệu"), "", 2, "", ""),
+    (10, ("造粒", "Tạo hạt"), "", 3, 1, ""),
+    (11, ("电工", "Thợ điện"), "", 2, "", ""),
+    (12, ("办公室", "Văn phòng"), "", 4, "", ""),
+    (13, ("QC", "QC"), "", 2, "", ""),
+    (14, ("阿秋，阿勇", "A Qiu, A Yong"), "", 2, "", ""),
+    (15, ("临时工", "Công nhân thời vụ"), "MERGE_4", "", "", ""),
+    (15, ("新临时工", "Công nhân thời vụ mới"), "MERGE_2", "", "", ""),
+]
 
-if uploaded_file is not None:
-    file_type = uploaded_file.name.split('.')[-1].lower()
+# --- Layout ---
+ws.merge_cells("A1:F1")
+ws["A1"] = f"{title_cn}\n{title_vi}"
+ws.row_dimensions[1].height = 42
 
-    st.sidebar.subheader("Kiểu Dịch")
-    mode = st.sidebar.radio(
-        "Chọn hướng dịch phù hợp với file:",
-        ["Trung - Việt", "Việt - Trung"],
-        help="Chọn 'Trung - Việt' nếu file gốc chứa tiếng Trung. Chọn 'Việt - Trung' nếu file gốc chứa tiếng Việt."
-    )
+# Header row
+for col, (cn, vi) in enumerate(headers, 1):
+    cell = ws.cell(row=2, column=col)
+    cell.value = cn if cn == vi else f"{cn}\n{vi}"
+    cell.font = Font(name="Microsoft YaHei", size=11, bold=True)
+    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    cell.fill = PatternFill("solid", fgColor="ED7D00")
 
-    # ------------------ 1. XỬ LÝ FILE EXCEL ------------------
-    if file_type == "xlsx":
-        st.subheader("📊 Dịch File Excel (Giữ nguyên định dạng gốc)")
-        df = pd.read_excel(uploaded_file)
-        
-        st.write("Dữ liệu gốc:")
-        st.dataframe(df.head())
+ws.row_dimensions[2].height = 36
 
-        if st.button("🚀 Bắt đầu Dịch"):
-            with st.spinner("Đang dịch toàn bộ file Excel..."):
-                # Duyệt giữ nguyên 100% cấu trúc hàng/cột của file gốc
-                df_translated = df.map(lambda x: format_bilingual(x, mode) if pd.notnull(x) else x)
-            
-            st.success("Dịch hoàn tất!")
-            st.dataframe(df_translated)
+# Body rows
+start_row = 3
+for i, (stt, dept, machines, formal, temp, remark) in enumerate(rows, start_row):
+    ws.cell(i, 1, stt)
+    ws.cell(i, 2, f"{dept[0]}\n{dept[1]}")
+    if machines != "MERGE_4" and machines != "MERGE_2":
+        ws.cell(i, 3, machines)
+        ws.cell(i, 4, formal)
+        ws.cell(i, 5, temp)
+    ws.cell(i, 6, f"{remark[0]}\n{remark[1]}" if isinstance(remark, tuple) else remark)
 
-            # Xuất file Excel giữ nguyên khung cấu trúc
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df_translated.to_excel(writer, index=False)
-                
-                # Bật tự động xuống dòng (Wrap Text) cho từng ô để hiển thị 2 dòng
-                ws = writer.sheets['Sheet1']
-                for row in ws.iter_rows(min_row=2):
-                    for cell in row:
-                        cell.alignment = openpyxl.styles.Alignment(wrap_text=True, vertical='center')
+    for c in range(1, 7):
+        ws.cell(i, c).font = Font(name="Microsoft YaHei", size=10)
+        ws.cell(i, c).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws.row_dimensions[i].height = 32
 
-            st.download_button(
-                label="📥 Tải File Excel Song Ngữ",
-                data=output.getvalue(),
-                file_name=f"translated_{uploaded_file.name}",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+# Merge the C:E cells for the two temporary-worker rows, matching the image
+ws.merge_cells(start_row=17, start_column=3, end_row=17, end_column=5)
+ws["C17"] = 4
+ws["C17"].alignment = Alignment(horizontal="center", vertical="center")
+ws.merge_cells(start_row=18, start_column=3, end_row=18, end_column=5)
+ws["C18"] = 2
+ws["C18"].alignment = Alignment(horizontal="center", vertical="center")
 
-    # ------------------ 2. XỬ LÝ FILE ẢNH ------------------
-    elif file_type in ["png", "jpg", "jpeg"]:
-        st.subheader("🖼️ Dịch File Ảnh (Giữ nguyên vị trí chữ trên ảnh)")
-        image = Image.open(uploaded_file).convert("RGB")
-        img_np = np.array(image)
+# Remark "套袋" is vertically centered across rows 15-16
+ws.merge_cells("F17:F18")
+ws["F17"] = "套袋\nĐóng túi"
+ws["F17"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.image(image, caption="Ảnh gốc", use_container_width=True)
+# Total row
+ws.merge_cells("A19:B19")
+ws["A19"] = "一共\nTổng cộng"
+ws.merge_cells("C19:E19")
+ws["C19"] = 42
+ws["A19"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+ws["C19"].alignment = Alignment(horizontal="center", vertical="center")
+ws.row_dimensions[19].height = 34
 
-        if st.button("🚀 Bắt đầu Dịch Ảnh"):
-            with st.spinner("Đang nhận diện vị trí và dịch chữ..."):
-                reader = get_ocr_reader(('ch_sim', 'en') if mode == "Trung - Việt" else ('vi', 'en'))
-                results = reader.readtext(img_np)
+# Borders for all cells, including merged areas
+thin = Side(style="thin", color="000000")
+border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-                img_result = image.copy()
-                draw = ImageDraw.Draw(img_result)
-                font = ImageFont.load_default()
+for row in ws.iter_rows(min_row=1, max_row=19, min_col=1, max_col=6):
+    for cell in row:
+        cell.border = border
 
-                for (bbox, text, prob) in results:
-                    if prob > 0.35 and len(str(text).strip()) > 0:
-                        bilingual_text = format_bilingual(text, mode)
+# Reapply border to merged-region anchors and edges
+for rng in ["A1:F1", "A19:B19", "C19:E19", "C17:E17", "C18:E18", "F17:F18"]:
+    # openpyxl preserves the merged structure; anchor formatting is enough for content,
+    # and the surrounding cells already carry borders.
+    pass
 
-                        x_min, y_min = int(bbox[0][0]), int(bbox[0][1])
-                        x_max, y_max = int(bbox[2][0]), int(bbox[2][1])
+# Column widths approximating the source image
+widths = {"A": 8, "B": 24, "C": 14, "D": 16, "E": 16, "F": 18}
+for col, width in widths.items():
+    ws.column_dimensions[col].width = width
 
-                        # Che văn bản cũ
-                        draw.rectangle([x_min, y_min, x_max, y_max], fill="white")
-                        # Ghi chữ song ngữ tại đúng vị trí khung cũ
-                        draw.text((x_min, y_min), bilingual_text, fill="black", font=font)
+# Title styling
+ws["A1"].font = Font(name="Microsoft YaHei", size=13, bold=True)
+ws["A1"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-            with col2:
-                st.image(img_result, caption="Ảnh sau khi dịch song ngữ", use_container_width=True)
+# Print / page setup
+ws.sheet_view.showGridLines = False
+ws.freeze_panes = "A3"
+ws.page_setup.orientation = "landscape"
+ws.page_setup.fitToWidth = 1
+ws.page_setup.fitToHeight = 1
+ws.sheet_properties.pageSetUpPr.fitToPage = True
+ws.page_margins = PageMargins(left=0.2, right=0.2, top=0.3, bottom=0.3, header=0.1, footer=0.1)
 
-                buf = io.BytesIO()
-                img_result.save(buf, format="PNG")
-                st.download_button(
-                    label="📥 Tải Ảnh Kết Quả",
-                    data=buf.getvalue(),
-                    file_name=f"translated_{uploaded_file.name}",
-                    mime="image/png"
-                )
+# Make the total visually bold
+for cell_ref in ["A19", "C19"]:
+    ws[cell_ref].font = Font(name="Microsoft YaHei", size=11, bold=True)
+
+wb.save(out)
+
+print(f"Đã tạo file Excel song ngữ: {out}")
