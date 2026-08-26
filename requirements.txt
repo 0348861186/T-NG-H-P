@@ -1,8 +1,7 @@
 streamlit
-pandas
-openpyxl
-easyocr
-opencv-python-headless
-deep-translator
-Pillow
 numpy
+opencv-python
+ezdxf
+shapely
+Pillow
+matplotlib
