@@ -1,24 +1,22 @@
 import streamlit as st
 import pandas as pd
 import easyocr
-import cv2
 import numpy as np
 from deep_translator import GoogleTranslator
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import io
 
 # 1. Cấu hình trang Dashboard
 st.set_page_config(page_title="Dịch Song Ngữ Trung - Việt", layout="wide")
 st.title("🌐 Ứng dụng Dịch Song Ngữ Trung - Việt")
 
-# Cache bộ đọc OCR để không bị load lại mỗi lần thao tác
+# Cache bộ đọc OCR linh hoạt theo ngôn ngữ nguồn
 @st.cache_resource
-def load_ocr():
-    return easyocr.Reader(['zh_sim', 'vi'], gpu=False)
+def get_ocr_reader(lang_tuple):
+    # Truyền tuple ngôn ngữ vào EasyOCR
+    return easyocr.Reader(list(lang_tuple), gpu=False)
 
-reader = load_ocr()
-
-# Hàm hỗ trợ dịch văn bản
+# Hàm hỗ trợ dịch văn bản đơn thuần (cho Excel)
 def translate_text(text, mode):
     if not str(text).strip():
         return text
@@ -81,7 +79,7 @@ if uploaded_file is not None:
     # ------------------ XỬ LÝ FILE ẢNH ------------------
     elif file_type in ["png", "jpg", "jpeg"]:
         st.subheader("🖼️ Xử lý File Ảnh")
-        image = Image.open(uploaded_file)
+        image = Image.open(uploaded_file).convert("RGB")
         img_np = np.array(image)
 
         col1, col2 = st.columns(2)
@@ -89,13 +87,25 @@ if uploaded_file is not None:
             st.image(image, caption="Ảnh gốc", use_container_width=True)
 
         if st.button("🚀 Bắt đầu Dịch Ảnh"):
-            with st.spinner("Đang nhận diện chữ và dịch..."):
+            with st.spinner("Đang khởi tạo OCR và dịch..."):
+                # Tải động OCR reader theo hướng dịch (CÁCH 1)
+                if mode == "Trung - Việt":
+                    reader = get_ocr_reader(('zh_sim', 'en'))
+                else:
+                    reader = get_ocr_reader(('vi', 'en'))
+
                 # Nhận diện vị trí và chữ trong ảnh
                 results = reader.readtext(img_np)
-                img_result = img_np.copy()
+                
+                # Tạo đối tượng vẽ bằng Pillow để hỗ trợ font tiếng Việt/Trung
+                img_result = image.copy()
+                draw = ImageDraw.Draw(img_result)
+                
+                # Nạp font mặc định
+                font = ImageFont.load_default()
 
                 for (bbox, text, prob) in results:
-                    if prob > 0.3:  # Độ tin cậy
+                    if prob > 0.3:  # Chỉ xử lý các vùng chữ có độ tin cậy > 30%
                         # Xử lý nội dung dịch song ngữ
                         if mode == "Trung - Việt":
                             trans = GoogleTranslator(source='zh-CN', target='vi').translate(text)
@@ -104,16 +114,30 @@ if uploaded_file is not None:
                             trans = GoogleTranslator(source='vi', target='zh-CN').translate(text)
                             line1, line2 = trans, text
 
-                        # Vẽ lại lên ảnh tại đúng vị trí khung chữ
-                        pt1 = (int(bbox[0][0]), int(bbox[0][1]))
-                        pt2 = (int(bbox[2][0]), int(bbox[2][1]))
-                        
-                        # Che chữ cũ bằng khung trắng
-                        cv2.rectangle(img_result, pt1, pt2, (255, 255, 255), -1)
-                        # Ghép chữ song ngữ dòng trên tiếng Trung, dòng dưới tiếng Việt
-                        display_text = f"{line1} | {line2}"
-                        cv2.putText(img_result, display_text, (pt1[0], pt1[1] + 15), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+                        # Xác định tọa độ khung chữ
+                        x_min = int(bbox[0][0])
+                        y_min = int(bbox[0][1])
+                        x_max = int(bbox[2][0])
+                        y_max = int(bbox[2][1])
+
+                        # 1. Vẽ hình chữ nhật nền trắng che văn bản cũ
+                        draw.rectangle([x_min, y_min, x_max, y_max], fill="white")
+
+                        # 2. Chuẩn bị văn bản 2 dòng (Trung trên, Việt dưới)
+                        display_text = f"{line1}\n{line2}"
+
+                        # 3. Vẽ văn bản song ngữ lên vị trí cũ
+                        draw.text((x_min, y_min), display_text, fill="black", font=font)
 
             with col2:
                 st.image(img_result, caption="Ảnh sau khi dịch song ngữ", use_container_width=True)
+
+                # Nút tải ảnh kết quả
+                buf = io.BytesIO()
+                img_result.save(buf, format="PNG")
+                st.download_button(
+                    label="📥 Tải Ảnh Kết Quả",
+                    data=buf.getvalue(),
+                    file_name=f"translated_{uploaded_file.name}",
+                    mime="image/png"
+                )
