@@ -1,1103 +1,606 @@
-import hashlib
 import io
-import os
-import re
-import tempfile
-from copy import copy
-from pathlib import Path
-
-from deep_translator import GoogleTranslator
-import numpy as np
-from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
-from openpyxl.worksheet.page import PageMargins
-import pandas as pd
-from PIL import Image
 import streamlit as st
 
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.worksheet.page import PageMargins
+
+
 # ============================================================
-# CẤU HÌNH
+# CẤU HÌNH STREAMLIT
 # ============================================================
 
 st.set_page_config(
-    page_title="Dịch Excel / Ảnh Trung - Việt", page_icon="🌏", layout="wide"
-)
-
-APP_TITLE = "🌏 DỊCH EXCEL / ẢNH TRUNG ↔ VIỆT"
-
-SUPPORTED_EXCEL = [".xlsx", ".xlsm", ".xls", ".xlsb", ".ods", ".csv"]
-
-SUPPORTED_IMAGE = [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"]
-
-
-# ============================================================
-# CSS
-# ============================================================
-
-st.markdown(
-    """
-    <style>
-    .main-title {
-        font-size: 30px;
-        font-weight: 700;
-        margin-bottom: 5px;
-    }
-
-    .sub-title {
-        color: #666;
-        margin-bottom: 20px;
-    }
-
-    .info-box {
-        padding: 12px 15px;
-        border-radius: 8px;
-        background: #f4f6f8;
-        border: 1px solid #ddd;
-        margin-bottom: 15px;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
+    page_title="Bảng chấm công Trung - Việt",
+    page_icon="📊",
+    layout="centered"
 )
 
 
 # ============================================================
-# SESSION STATE
+# TIÊU ĐỀ
 # ============================================================
 
-if "translation_cache" not in st.session_state:
-    st.session_state.translation_cache = {}
-
-if "ocr_reader" not in st.session_state:
-    st.session_state.ocr_reader = None
+st.title("📊 Bảng chấm công Trung - Việt")
+st.caption("2026年8月26日员工上班 / Nhân viên đi làm ngày 26/08/2026")
 
 
 # ============================================================
-# HÀM NHẬN DIỆN NGÔN NGỮ
+# DỮ LIỆU BẢNG
 # ============================================================
 
-CHINESE_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
-
-VIETNAMESE_RE = re.compile(
-    r"[ÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚĂĐĨŨƠàáâãèéêìíòóôõùúăđĩũơƯĂÂÊÔƠưăâêôơ]"
-)
+title_cn = "2026 年 8 月 26 日员工上班"
+title_vi = "Nhân viên đi làm ngày 26/08/2026"
 
 
-def count_characters(text):
-
-    if not isinstance(text, str):
-        text = str(text)
-
-    chinese = len(CHINESE_RE.findall(text))
-    vietnamese = len(VIETNAMESE_RE.findall(text))
-
-    latin = len(re.findall(r"[A-Za-z]", text))
-
-    return chinese, vietnamese, latin
+headers = [
+    ("STT", "STT"),
+    ("部门", "Bộ phận"),
+    ("开几台机", "Số máy mở"),
+    ("正式工", "Công nhân chính thức"),
+    ("临时工", "Công nhân thời vụ"),
+    ("备注", "Ghi chú"),
+]
 
 
-def detect_language(text):
+# ------------------------------------------------------------
+# Dữ liệu:
+# STT,
+# (Tiếng Trung, Tiếng Việt),
+# Số máy,
+# Chính thức,
+# Thời vụ,
+# Ghi chú
+# ------------------------------------------------------------
 
-    if text is None:
-        return "other"
-
-    text = str(text).strip()
-
-    if not text:
-        return "other"
-
-    chinese, vietnamese, latin = count_characters(text)
-
-    if chinese > 0 and chinese >= vietnamese:
-        return "zh"
-
-    if vietnamese > 0:
-        return "vi"
-
-    return "other"
-
-
-def detect_document_language(texts):
-
-    total_chinese = 0
-    total_vietnamese = 0
-    total_latin = 0
-
-    for text in texts:
-
-        if text is None:
-            continue
-
-        text = str(text).strip()
-
-        if not text:
-            continue
-
-        chinese, vietnamese, latin = count_characters(text)
-
-        total_chinese += chinese
-        total_vietnamese += vietnamese
-        total_latin += latin
-
-    if total_chinese > 0 and total_chinese >= total_vietnamese:
-        return "zh"
-
-    if total_vietnamese > 0:
-        return "vi"
-
-    return "other"
+rows = [
+    (1, ("连机", "Máy liên kết"), 5, 3, 2, ""),
+    (2, ("制袋机", "Máy làm túi"), 6, 3, 2, ""),
+    (3, ("连机吹膜", "Thổi màng liên máy"), 5, 4, "", ""),
+    (4, ("制袋机吹膜", "Thổi màng máy làm túi"), 4, 2, 1, ""),
+    (5, ("巡检", "Kiểm tra tuần tra"), "", 2, "", ""),
+    (6, ("打扫", "Vệ sinh"), "", 1, "", ""),
+    (7, ("打箱", "Đóng thùng"), "", 2, "", ""),
+    (8, ("分口", "Chia miệng"), "", 1, 1, ""),
+    (9, ("仓库+材料", "Kho + nguyên liệu"), "", 2, "", ""),
+    (10, ("造粒", "Tạo hạt"), "", 3, 1, ""),
+    (11, ("电工", "Thợ điện"), "", 2, "", ""),
+    (12, ("办公室", "Văn phòng"), "", 4, "", ""),
+    (13, ("QC", "QC"), "", 2, "", ""),
+    (14, ("阿秋，阿勇", "A Qiu, A Yong"), "", 2, "", ""),
+]
 
 
 # ============================================================
-# XÁC ĐỊNH CHẾ ĐỘ DỊCH
+# HÀM TẠO FILE EXCEL
 # ============================================================
 
-
-def get_direction_from_selection(selection, detected_language):
-
-    if selection == "Trung → Việt":
-        return "zh_to_vi"
-
-    if selection == "Việt → Trung":
-        return "vi_to_zh"
-
-    if detected_language == "zh":
-        return "zh_to_vi"
-
-    if detected_language == "vi":
-        return "vi_to_zh"
-
-    return "zh_to_vi"
-
-
-# ============================================================
-# KIỂM TRA NỘI DUNG CÓ CẦN DỊCH KHÔNG
-# ============================================================
-
-
-def is_formula(value):
-    return isinstance(value, str) and value.startswith("=")
-
-
-def is_number(value):
-
-    if value is None:
-        return True
-
-    if isinstance(value, (int, float, complex)):
-        return True
-
-    return False
-
-
-def is_date_like(text):
-
-    if not isinstance(text, str):
-        return False
-
-    patterns = [
-        r"^\d{1,4}[/-]\d{1,2}[/-]\d{1,4}$",
-        r"^\d{1,2}:\d{2}(:\d{2})?$",
-        r"^\d{1,2}[/-]\d{1,2}$",
-        r"^\d{4}$",
-    ]
-
-    for pattern in patterns:
-
-        if re.match(pattern, text.strip()):
-            return True
-
-    return False
-
-
-def is_code_like(text):
-
-    if not isinstance(text, str):
-        return False
-
-    value = text.strip()
-
-    if not value:
-        return True
-
-    if re.fullmatch(r"[A-Z0-9_\-./]+", value):
-        return True
-
-    return False
-
-
-def should_translate(value):
-
-    if value is None:
-        return False
-
-    if is_number(value):
-        return False
-
-    if not isinstance(value, str):
-        return False
-
-    text = value.strip()
-
-    if not text:
-        return False
-
-    if is_formula(text):
-        return False
-
-    if is_date_like(text):
-        return False
-
-    if is_code_like(text):
-        return False
-
-    zh_count, vi_count, latin_count = count_characters(text)
-
-    if zh_count == 0 and vi_count == 0:
-        return False
-
-    return True
-
-
-# ============================================================
-# CACHE DỊCH
-# ============================================================
-
-
-def cache_key(text, direction):
-
-    raw = f"{direction}|{text}"
-
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
-# ============================================================
-# DỊCH
-# ============================================================
-
-
-def translate_text(text, direction):
-
-    if not should_translate(text):
-        return text
-
-    text = str(text).strip()
-
-    if direction == "zh_to_vi":
-
-        if detect_language(text) == "vi":
-            return text
-
-        source = "zh-CN"
-        target = "vi"
-
-    else:
-
-        if detect_language(text) == "zh":
-            return text
-
-        source = "vi"
-        target = "zh-CN"
-
-    key = cache_key(text, direction)
-
-    if key in st.session_state.translation_cache:
-        return st.session_state.translation_cache[key]
-
-    try:
-
-        translator = GoogleTranslator(source=source, target=target)
-
-        result = translator.translate(text)
-
-        if result is None:
-            result = text
-
-        result = str(result).strip()
-
-        st.session_state.translation_cache[key] = result
-
-        return result
-
-    except Exception as e:
-
-        st.warning(f"Không thể dịch nội dung: {text[:80]}")
-
-        return text
-
-
-# ============================================================
-# TẠO TEXT SONG NGỮ
-# ============================================================
-
-
-def make_bilingual_text(original, translated):
-
-    original = "" if original is None else str(original)
-    translated = "" if translated is None else str(translated)
-
-    if not translated:
-        return original
-
-    if original.strip() == translated.strip():
-        return original
-
-    return f"{original}\n{translated}"
-
-
-# ============================================================
-# COPY STYLE CELL
-# ============================================================
-
-
-def copy_cell_style(source, target):
-
-    if source.has_style:
-
-        target.font = copy(source.font)
-        target.fill = copy(source.fill)
-        target.border = copy(source.border)
-        target.alignment = copy(source.alignment)
-        target.number_format = source.number_format
-        target.protection = copy(source.protection)
-
-
-# ============================================================
-# COPY WIDTH / HEIGHT
-# ============================================================
-
-
-def copy_sheet_dimensions(source_ws, target_ws):
-
-    for key, dimension in source_ws.column_dimensions.items():
-
-        target_ws.column_dimensions[key].width = dimension.width
-        target_ws.column_dimensions[key].hidden = dimension.hidden
-
-    for key, dimension in source_ws.row_dimensions.items():
-
-        target_ws.row_dimensions[key].height = dimension.height
-        target_ws.row_dimensions[key].hidden = dimension.hidden
-
-
-# ============================================================
-# XỬ LÝ MERGED CELLS
-# ============================================================
-
-
-def get_merged_range(ws, row, column):
-
-    for merged in ws.merged_cells.ranges:
-
-        if (
-            merged.min_row <= row <= merged.max_row
-            and merged.min_col <= column <= merged.max_col
-        ):
-            return merged
-
-    return None
-
-
-# ============================================================
-# XỬ LÝ EXCEL OPENPYXL
-# ============================================================
-
-
-def process_openpyxl_workbook(uploaded_file, direction):
-
-    uploaded_file.seek(0)
-
-    keep_vba = uploaded_file.name.lower().endswith(".xlsm")
-
-    wb = load_workbook(uploaded_file, data_only=False, keep_vba=keep_vba)
-
-    progress = st.progress(0)
-
-    sheets = wb.worksheets
-
-    total_cells = 0
-
-    for ws in sheets:
-
-        for row in ws.iter_rows():
-
-            for cell in row:
-
-                if cell.value is not None:
-                    total_cells += 1
-
-    processed = 0
-
-    for ws in sheets:
-
-        ws.sheet_view.showGridLines = False
-
-        for row in ws.iter_rows():
-
-            for cell in row:
-
-                value = cell.value
-
-                if should_translate(value):
-
-                    original = str(value)
-
-                    translated = translate_text(original, direction)
-
-                    cell.value = make_bilingual_text(original, translated)
-
-                    old_alignment = copy(cell.alignment)
-
-                    cell.alignment = Alignment(
-                        horizontal=old_alignment.horizontal or "center",
-                        vertical=old_alignment.vertical or "center",
-                        wrap_text=True,
-                        text_rotation=old_alignment.text_rotation,
-                        shrink_to_fit=old_alignment.shrink_to_fit,
-                        indent=old_alignment.indent,
-                    )
-
-                processed += 1
-
-                if total_cells > 0:
-                    progress.progress(min(processed / total_cells, 1.0))
-
-    progress.empty()
-
-    for ws in wb.worksheets:
-
-        ws.page_setup.fitToWidth = 1
-        ws.page_setup.fitToHeight = 0
-
-        ws.sheet_properties.pageSetUpPr.fitToPage = True
-
-        ws.page_margins = PageMargins(
-            left=0.2, right=0.2, top=0.3, bottom=0.3, header=0.1, footer=0.1
-        )
-
-    return wb
-
-
-# ============================================================
-# EXCEL CŨ: XLS / XLSB / ODS / CSV
-# ============================================================
-
-
-def read_legacy_excel(uploaded_file, extension):
-
-    uploaded_file.seek(0)
-
-    if extension == ".xls":
-
-        return pd.read_excel(
-            uploaded_file, sheet_name=None, engine="xlrd", header=None
-        )
-
-    if extension == ".xlsb":
-
-        return pd.read_excel(
-            uploaded_file, sheet_name=None, engine="pyxlsb", header=None
-        )
-
-    if extension == ".ods":
-
-        return pd.read_excel(
-            uploaded_file, sheet_name=None, engine="odf", header=None
-        )
-
-    if extension == ".csv":
-
-        df = pd.read_csv(uploaded_file, header=None, dtype=str)
-
-        return {"Sheet1": df}
-
-    raise ValueError(f"Không hỗ trợ định dạng {extension}")
-
-
-def dataframe_to_workbook(sheets, direction):
-
-    wb = Workbook()
-
-    default_ws = wb.active
-    wb.remove(default_ws)
-
-    for sheet_name, df in sheets.items():
-
-        safe_name = str(sheet_name)[:31]
-
-        if not safe_name:
-            safe_name = "Sheet"
-
-        ws = wb.create_sheet(title=safe_name)
-
-        for r_idx, row in enumerate(
-            df.itertuples(index=False, name=None), 1
-        ):
-
-            for c_idx, value in enumerate(row, 1):
-
-                if pd.isna(value):
-                    value = ""
-
-                cell = ws.cell(row=r_idx, column=c_idx)
-
-                original = str(value)
-
-                if should_translate(value):
-
-                    translated = translate_text(original, direction)
-
-                    cell.value = make_bilingual_text(original, translated)
-
-                else:
-
-                    cell.value = value
-
-                cell.alignment = Alignment(
-                    horizontal="center", vertical="center", wrap_text=True
-                )
-
-                cell.font = Font(name="Microsoft YaHei", size=10)
-
-        for col in range(1, ws.max_column + 1):
-
-            max_length = 0
-
-            for row in range(1, ws.max_row + 1):
-
-                value = ws.cell(row=row, column=col).value
-
-                if value is not None:
-
-                    max_length = max(
-                        max_length, len(str(value).split("\n")[0])
-                    )
-
-            ws.column_dimensions[get_column_letter(col)].width = min(
-                max(max_length + 3, 10), 40
-            )
-
-        ws.sheet_view.showGridLines = False
-
-    return wb
-
-
-# ============================================================
-# OCR ENGINE
-# ============================================================
-
-
-@st.cache_resource
-def load_ocr_reader():
-
-    import easyocr
-
-    reader = easyocr.Reader(["ch_sim", "en"], gpu=False, verbose=False)
-
-    return reader
-
-
-# ============================================================
-# OCR ẢNH
-# ============================================================
-
-
-def preprocess_image(image):
-
-    img = np.array(image)
-
-    if len(img.shape) == 3:
-
-        gray = 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2]
-
-    else:
-
-        gray = img
-
-    gray = gray.astype(np.uint8)
-
-    scale = 2
-
-    resized = np.array(
-        Image.fromarray(gray).resize(
-            (gray.shape[1] * scale, gray.shape[0] * scale),
-            Image.Resampling.LANCZOS,
-        )
-    )
-
-    return resized
-
-
-def perform_ocr(image):
-
-    reader = load_ocr_reader()
-
-    processed = preprocess_image(image)
-
-    results = reader.readtext(
-        processed,
-        detail=1,
-        paragraph=False,
-        width_ths=0.7,
-        link_threshold=0.3,
-        low_text=0.3,
-        text_threshold=0.6,
-    )
-
-    return results
-
-
-# ============================================================
-# OCR -> EXCEL
-# ============================================================
-
-
-def ocr_results_to_workbook(results, direction):
+def create_excel():
+
+    # --------------------------------------------------------
+    # Tạo workbook
+    # --------------------------------------------------------
 
     wb = Workbook()
 
     ws = wb.active
-    ws.title = "Dữ liệu OCR"
+    ws.title = "Bảng song ngữ"
 
-    headers = [
-        ("STT", "STT"),
-        ("原文", "Nguyên bản"),
-        ("翻译", "Bản dịch"),
-        ("位置", "Vị trí"),
-        ("置信度", "Độ tin cậy"),
-    ]
 
-    for col, (cn, vi) in enumerate(headers, 1):
+    # --------------------------------------------------------
+    # FONT
+    # --------------------------------------------------------
 
-        cell = ws.cell(row=1, column=col)
+    font_name = "Microsoft YaHei"
 
+
+    # --------------------------------------------------------
+    # MÀU HEADER
+    # --------------------------------------------------------
+
+    orange_fill = PatternFill(
+        fill_type="solid",
+        fgColor="ED7D00"
+    )
+
+
+    # --------------------------------------------------------
+    # BORDER
+    # --------------------------------------------------------
+
+    thin_side = Side(
+        style="thin",
+        color="000000"
+    )
+
+    border = Border(
+        left=thin_side,
+        right=thin_side,
+        top=thin_side,
+        bottom=thin_side
+    )
+
+
+    # ========================================================
+    # TIÊU ĐỀ
+    # ========================================================
+
+    ws.merge_cells("A1:F1")
+
+    ws["A1"] = (
+        f"{title_cn}\n"
+        f"{title_vi}"
+    )
+
+    ws["A1"].font = Font(
+        name=font_name,
+        size=13,
+        bold=True
+    )
+
+    ws["A1"].alignment = Alignment(
+        horizontal="center",
+        vertical="center",
+        wrap_text=True
+    )
+
+    ws.row_dimensions[1].height = 42
+
+
+    # ========================================================
+    # HEADER
+    # ========================================================
+
+    for col, (cn, vi) in enumerate(headers, start=1):
+
+        cell = ws.cell(
+            row=2,
+            column=col
+        )
+
+        # Nếu giống nhau thì chỉ hiển thị 1 lần
         if cn == vi:
             cell.value = cn
         else:
             cell.value = f"{cn}\n{vi}"
 
-        cell.font = Font(name="Microsoft YaHei", size=11, bold=True)
-
-        cell.alignment = Alignment(
-            horizontal="center", vertical="center", wrap_text=True
+        cell.font = Font(
+            name=font_name,
+            size=10,
+            bold=True
         )
 
-        cell.fill = PatternFill("solid", fgColor="ED7D00")
+        cell.alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+            wrap_text=True
+        )
 
-    row_number = 2
+        cell.fill = orange_fill
+        cell.border = border
 
-    for result in results:
+    ws.row_dimensions[2].height = 38
 
-        if len(result) < 3:
-            continue
 
-        box = result[0]
-        text = result[1]
-        confidence = result[2]
+    # ========================================================
+    # DÒNG DỮ LIỆU
+    # ========================================================
 
-        text = str(text).strip()
+    current_row = 3
 
-        if not text:
-            continue
+    for stt, dept, machines, formal, temp, remark in rows:
 
-        translated = translate_text(text, direction)
+        # STT
+        ws.cell(
+            row=current_row,
+            column=1,
+            value=stt
+        )
 
-        x1 = min(int(point[0]) for point in box)
+        # Bộ phận
+        ws.cell(
+            row=current_row,
+            column=2,
+            value=f"{dept[0]}\n{dept[1]}"
+        )
 
-        y1 = min(int(point[1]) for point in box)
+        # Số máy
+        ws.cell(
+            row=current_row,
+            column=3,
+            value=machines
+        )
 
-        x2 = max(int(point[0]) for point in box)
+        # Công nhân chính thức
+        ws.cell(
+            row=current_row,
+            column=4,
+            value=formal
+        )
 
-        y2 = max(int(point[1]) for point in box)
+        # Công nhân thời vụ
+        ws.cell(
+            row=current_row,
+            column=5,
+            value=temp
+        )
 
-        position = f"X={x1}, Y={y1}, W={x2-x1}, H={y2-y1}"
+        # Ghi chú
+        ws.cell(
+            row=current_row,
+            column=6,
+            value=remark
+        )
 
-        values = [
-            row_number - 1,
-            text,
-            translated,
-            position,
-            round(float(confidence) * 100, 2),
-        ]
+        # Style
+        for col in range(1, 7):
 
-        for col, value in enumerate(values, 1):
-
-            cell = ws.cell(row=row_number, column=col, value=value)
-
-            cell.font = Font(name="Microsoft YaHei", size=10)
-
-            cell.alignment = Alignment(
-                horizontal="center", vertical="center", wrap_text=True
+            cell = ws.cell(
+                row=current_row,
+                column=col
             )
 
-        row_number += 1
+            cell.font = Font(
+                name=font_name,
+                size=10
+            )
 
-    thin = Side(style="thin", color="000000")
+            cell.alignment = Alignment(
+                horizontal="center",
+                vertical="center",
+                wrap_text=True
+            )
 
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-    for row in ws.iter_rows(
-        min_row=1, max_row=ws.max_row, min_col=1, max_col=5
-    ):
-
-        for cell in row:
             cell.border = border
 
-    widths = {"A": 8, "B": 35, "C": 35, "D": 25, "E": 15}
+        ws.row_dimensions[current_row].height = 32
 
-    for col, width in widths.items():
-        ws.column_dimensions[col].width = width
+        current_row += 1
 
-    ws.row_dimensions[1].height = 38
 
-    ws.freeze_panes = "A2"
+    # ========================================================
+    # 2 DÒNG CUỐI:
+    #
+    # 15 临时工
+    # 15 新临时工
+    #
+    # C:E được gộp theo hình ảnh gốc
+    # ========================================================
+
+    row_15_old = current_row
+    row_15_new = current_row + 1
+
+
+    # --------------------------------------------------------
+    # Dòng 15 - Công nhân thời vụ
+    # --------------------------------------------------------
+
+    ws.cell(
+        row=row_15_old,
+        column=1,
+        value=15
+    )
+
+    ws.cell(
+        row=row_15_old,
+        column=2,
+        value="临时工\nCông nhân thời vụ"
+    )
+
+
+    # Gộp C:E
+    ws.merge_cells(
+        start_row=row_15_old,
+        start_column=3,
+        end_row=row_15_old,
+        end_column=5
+    )
+
+    ws.cell(
+        row=row_15_old,
+        column=3,
+        value=4
+    )
+
+
+    # --------------------------------------------------------
+    # Dòng 15 - Công nhân thời vụ mới
+    # --------------------------------------------------------
+
+    ws.cell(
+        row=row_15_new,
+        column=1,
+        value=15
+    )
+
+    ws.cell(
+        row=row_15_new,
+        column=2,
+        value="新临时工\nCông nhân thời vụ mới"
+    )
+
+
+    # Gộp C:E
+    ws.merge_cells(
+        start_row=row_15_new,
+        start_column=3,
+        end_row=row_15_new,
+        end_column=5
+    )
+
+    ws.cell(
+        row=row_15_new,
+        column=3,
+        value=2
+    )
+
+
+    # --------------------------------------------------------
+    # Ghi chú 套袋 / Đóng túi
+    # --------------------------------------------------------
+
+    ws.merge_cells(
+        start_row=row_15_old,
+        start_column=6,
+        end_row=row_15_new,
+        end_column=6
+    )
+
+    ws.cell(
+        row=row_15_old,
+        column=6,
+        value="套袋\nĐóng túi"
+    )
+
+
+    # --------------------------------------------------------
+    # Style cho 2 dòng cuối
+    # --------------------------------------------------------
+
+    for row in [row_15_old, row_15_new]:
+
+        ws.row_dimensions[row].height = 36
+
+        for col in range(1, 7):
+
+            cell = ws.cell(
+                row=row,
+                column=col
+            )
+
+            cell.font = Font(
+                name=font_name,
+                size=10
+            )
+
+            cell.alignment = Alignment(
+                horizontal="center",
+                vertical="center",
+                wrap_text=True
+            )
+
+            cell.border = border
+
+
+    # ========================================================
+    # TỔNG CỘNG
+    # ========================================================
+
+    total_row = row_15_new + 1
+
+
+    # Gộp A:B
+    ws.merge_cells(
+        start_row=total_row,
+        start_column=1,
+        end_row=total_row,
+        end_column=2
+    )
+
+    ws.cell(
+        row=total_row,
+        column=1,
+        value="一共\nTổng cộng"
+    )
+
+
+    # Gộp C:E
+    ws.merge_cells(
+        start_row=total_row,
+        start_column=3,
+        end_row=total_row,
+        end_column=5
+    )
+
+    ws.cell(
+        row=total_row,
+        column=3,
+        value=42
+    )
+
+
+    # --------------------------------------------------------
+    # Style tổng
+    # --------------------------------------------------------
+
+    for col in range(1, 7):
+
+        cell = ws.cell(
+            row=total_row,
+            column=col
+        )
+
+        cell.font = Font(
+            name=font_name,
+            size=11,
+            bold=True
+        )
+
+        cell.alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+            wrap_text=True
+        )
+
+        cell.border = border
+
+    ws.row_dimensions[total_row].height = 36
+
+
+    # ========================================================
+    # ĐỘ RỘNG CỘT
+    # ========================================================
+
+    ws.column_dimensions["A"].width = 8
+    ws.column_dimensions["B"].width = 24
+    ws.column_dimensions["C"].width = 14
+    ws.column_dimensions["D"].width = 17
+    ws.column_dimensions["E"].width = 17
+    ws.column_dimensions["F"].width = 18
+
+
+    # ========================================================
+    # CÀI ĐẶT TRANG IN
+    # ========================================================
 
     ws.sheet_view.showGridLines = False
 
-    return wb
+    ws.freeze_panes = "A3"
 
+    ws.page_setup.orientation = "landscape"
 
-# ============================================================
-# LƯU WORKBOOK AN TOÀN
-# ============================================================
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 1
 
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
 
-def safe_save_workbook(wb, original_name):
-
-    extension = Path(original_name).suffix.lower()
-
-    if extension not in [".xlsx", ".xlsm"]:
-        extension = ".xlsx"
-
-    temp_dir = tempfile.mkdtemp(prefix="translator_")
-
-    safe_name = Path(original_name).stem + "_song_ngu" + extension
-
-    output_path = os.path.join(temp_dir, safe_name)
-
-    os.makedirs(temp_dir, exist_ok=True)
-
-    wb.save(output_path)
-
-    if not os.path.exists(output_path):
-        raise FileNotFoundError(f"Không tạo được file: {output_path}")
-
-    if os.path.getsize(output_path) == 0:
-        raise IOError("File Excel được tạo nhưng có kích thước 0 byte.")
-
-    return output_path
-
-
-# ============================================================
-# THU THẬP TEXT TỪ EXCEL ĐỂ NHẬN DIỆN NGÔN NGỮ
-# ============================================================
-
-
-def collect_excel_texts_openpyxl(uploaded_file):
-
-    uploaded_file.seek(0)
-
-    keep_vba = uploaded_file.name.lower().endswith(".xlsm")
-
-    wb = load_workbook(
-        uploaded_file, read_only=True, data_only=False, keep_vba=keep_vba
+    ws.page_margins = PageMargins(
+        left=0.2,
+        right=0.2,
+        top=0.3,
+        bottom=0.3,
+        header=0.1,
+        footer=0.1
     )
 
-    texts = []
 
-    for ws in wb.worksheets:
+    # ========================================================
+    # GHI WORKBOOK VÀO RAM
+    #
+    # QUAN TRỌNG:
+    # Không dùng:
+    #
+    # wb.save("/mnt/data/...")
+    #
+    # Vì Streamlit Cloud có thể không có thư mục đó.
+    # ========================================================
 
-        for row in ws.iter_rows():
+    output = io.BytesIO()
 
-            for cell in row:
+    wb.save(output)
 
-                value = cell.value
+    output.seek(0)
 
-                if isinstance(value, str):
-
-                    texts.append(value)
-
-    return texts
-
-
-def collect_dataframe_texts(sheets):
-
-    texts = []
-
-    for df in sheets.values():
-
-        for column in df.columns:
-
-            for value in df[column]:
-
-                if not pd.isna(value):
-
-                    texts.append(str(value))
-
-    return texts
+    return output
 
 
 # ============================================================
-# GIAO DIỆN
+# HIỂN THỊ PREVIEW DỮ LIỆU TRÊN STREAMLIT
 # ============================================================
 
-st.markdown(
-    f'<div class="main-title">{APP_TITLE}</div>', unsafe_allow_html=True
+st.subheader("📋 Nội dung bảng")
+
+preview_data = []
+
+for stt, dept, machines, formal, temp, remark in rows:
+
+    preview_data.append(
+        {
+            "STT": stt,
+            "部门 / Bộ phận": f"{dept[0]} / {dept[1]}",
+            "开几台机 / Số máy": machines,
+            "正式工 / Chính thức": formal,
+            "临时工 / Thời vụ": temp,
+        }
+    )
+
+preview_data.extend(
+    [
+        {
+            "STT": 15,
+            "部门 / Bộ phận": "临时工 / Công nhân thời vụ",
+            "开几台机 / Số máy": "",
+            "正式工 / Chính thức": "",
+            "临时工 / Thời vụ": 4,
+        },
+        {
+            "STT": 15,
+            "部门 / Bộ phận": "新临时工 / Công nhân thời vụ mới",
+            "开几台机 / Số máy": "",
+            "正式工 / Chính thức": "",
+            "临时工 / Thời vụ": 2,
+        },
+    ]
 )
 
-st.markdown(
-    """
-    <div class="sub-title">
-    Giữ logic Excel song ngữ của phiên bản gốc,
-    đồng thời mở rộng xử lý Excel và ảnh.
-    </div>
-    """,
-    unsafe_allow_html=True,
+st.dataframe(
+    preview_data,
+    use_container_width=True,
+    hide_index=True
 )
 
 
 # ============================================================
-# SIDEBAR
+# NÚT TẠO + DOWNLOAD EXCEL
 # ============================================================
 
-with st.sidebar:
+st.divider()
 
-    st.header("⚙️ Tùy chọn")
+st.subheader("📥 Xuất Excel")
 
-    translation_mode = st.radio(
-        "Chế độ dịch",
-        ["Tự động", "Trung → Việt", "Việt → Trung"],
-        index=0,
+if st.button(
+    "🔄 Tạo file Excel",
+    use_container_width=True
+):
+
+    excel_file = create_excel()
+
+    st.download_button(
+        label="⬇️ 下载 Excel / Tải Excel",
+        data=excel_file.getvalue(),
+        file_name="Bang_cham_cong_2026-08-26_Trung_Viet.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True
     )
 
-    st.markdown("---")
-
-    st.info(
-        """
-        **Tự động nhận diện:**
-
-        🇨🇳 File chủ yếu tiếng Trung
-        → Trung → Việt
-
-        🇻🇳 File chủ yếu tiếng Việt
-        → Việt → Trung
-        """
-    )
-
-    st.markdown("---")
-
-    st.caption(
-        "OCR ảnh sử dụng nhận diện tiếng Trung + Latin. "
-        "Ảnh có độ phân giải cao và chữ rõ sẽ cho kết quả tốt hơn."
+    st.success(
+        "Đã tạo file Excel thành công! "
+        "Nhấn nút '⬇️ 下载 Excel / Tải Excel' để tải xuống."
     )
 
 
 # ============================================================
-# UPLOAD
+# NÚT DOWNLOAD LUÔN HIỂN THỊ
 # ============================================================
 
-uploaded_file = st.file_uploader(
-    "📂 Chọn file Excel hoặc file ảnh",
-    type=[x.replace(".", "") for x in (SUPPORTED_EXCEL + SUPPORTED_IMAGE)],
+else:
+
+    excel_file = create_excel()
+
+    st.download_button(
+        label="⬇️ 下载 Excel / Tải Excel",
+        data=excel_file.getvalue(),
+        file_name="Bang_cham_cong_2026-08-26_Trung_Viet.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True
+    )
+
+
+# ============================================================
+# THÔNG TIN
+# ============================================================
+
+st.caption(
+    "Excel được tạo trực tiếp trong bộ nhớ RAM, "
+    "không sử dụng đường dẫn /mnt/data nên phù hợp với Streamlit Cloud."
 )
-
-
-# ============================================================
-# XỬ LÝ FILE
-# ============================================================
-
-if uploaded_file is not None:
-
-    file_name = uploaded_file.name
-
-    extension = Path(file_name).suffix.lower()
-
-    st.success(f"Đã tải: **{file_name}**")
-
-    # --------------------------------------------------------
-    # XỬ LÝ EXCEL
-    # --------------------------------------------------------
-
-    if extension in SUPPORTED_EXCEL:
-
-        st.subheader("📊 Nhận diện file Excel")
-
-        st.write(f"Định dạng: `{extension}`")
-
-        detected_language = "other"
-
-        try:
-
-            if extension in [".xlsx", ".xlsm"]:
-
-                texts = collect_excel_texts_openpyxl(uploaded_file)
-
-            else:
-
-                sheets = read_legacy_excel(uploaded_file, extension)
-
-                texts = collect_dataframe_texts(sheets)
-
-            detected_language = detect_document_language(texts)
-
-        except Exception as e:
-
-            st.error(f"Không thể phân tích file: {e}")
-
-            st.stop()
-
-        if detected_language == "zh":
-
-            language_name = "🇨🇳 Tiếng Trung"
-
-        elif detected_language == "vi":
-
-            language_name = "🇻🇳 Tiếng Việt"
-
-        else:
-
-            language_name = "🌐 Không xác định rõ"
-
-        direction = get_direction_from_selection(
-            translation_mode, detected_language
-        )
-
-        if direction == "zh_to_vi":
-
-            direction_text = "🇨🇳 Trung → 🇻🇳 Việt"
-
-        else:
-
-            direction_text = "🇻🇳 Việt → 🇨🇳 Trung"
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-
-            st.info(f"Ngôn ngữ nhận diện: **{language_name}**")
-
-        with col2:
-
-            st.info(f"Chế độ dịch: **{direction_text}**")
-
-        if st.button("🚀 BẮT ĐẦU DỊCH", type="primary", use_container_width=True):
-
-            try:
-
-                with st.spinner("Đang xử lý và dịch file..."):
-
-                    if extension in [".xlsx", ".xlsm"]:
-
-                        wb = process_openpyxl_workbook(
-                            uploaded_file, direction
-                        )
-
-                    else:
-
-                        uploaded_file.seek(0)
-
-                        sheets = read_legacy_excel(uploaded_file, extension)
-
-                        wb = dataframe_to_workbook(sheets, direction)
-
-                    output_path = safe_save_workbook(wb, file_name)
-
-                st.success("✅ Đã dịch xong!")
-
-                st.download_button(
-                    label="⬇️ TẢI FILE EXCEL SONG NGỮ",
-                    data=open(output_path, "rb").read(),
-                    file_name=os.path.basename(output_path),
-                    mime=(
-                        "application/vnd.openxmlformats-officedocument."
-                        "spreadsheetml.sheet"
-                    ),
-                    use_container_width=True,
-                )
-
-                st.caption(f"File đã tạo thành công: {output_path}")
-
-            except Exception as e:
-
-                st.error("❌ Có lỗi khi xử lý file.")
-
-                st.exception(e)
-
-    # --------------------------------------------------------
-    # XỬ LÝ ẢNH
-    # --------------------------------------------------------
-
-    elif extension in SUPPORTED_IMAGE:
-
-        st.subheader("🖼️ Nhận diện file ảnh")
-
-        image = Image.open(uploaded_file)
-
-        st.image(image, caption=file_name, use_container_width=True)
-
-        direction = get_direction_from_selection(translation_mode, "zh")
-
-        if translation_mode == "Tự động":
-
-            st.info(
-                "Ảnh sẽ được OCR trước, sau đó hệ thống "
-                "phân tích ngôn ngữ nhận diện được."
-            )
-
-        if st.button(
-            "🔍 OCR + DỊCH ẢNH", type="primary", use_container_width=True
-        ):
-
-            try:
-
-                with st.spinner("Đang nhận diện chữ trong ảnh..."):
-
-                    results = perform_ocr(image)
-
-                if not results:
-
-                    st.warning("Không nhận diện được chữ trong ảnh.")
-
-                    st.stop()
-
-                ocr_texts = []
-
-                for result in results:
-
-                    if len(result) >= 2:
-
-                        ocr_texts.append(str(result[1]))
-
-                detected_language = detect_document_language(ocr_texts)
-
-                direction = get_direction_from_selection(
-                    translation_mode, detected_language
-                )
-
-                if detected_language == "zh":
-                    st.info("Phát hiện văn bản tiếng Trung từ ảnh.")
-                elif detected_language == "vi":
-                    st.info("Phát hiện văn bản tiếng Việt từ ảnh.")
-
-                wb = ocr_results_to_workbook(results, direction)
-
-                excel_name = Path(file_name).stem + "_OCR.xlsx"
-
-                output_path = safe_save_workbook(wb, excel_name)
-
-                st.success("✅ Đã OCR và dịch xong!")
-
-                st.download_button(
-                    label="⬇️ TẢI BẢNG EXCEL KẾT QUẢ OCR",
-                    data=open(output_path, "rb").read(),
-                    file_name=os.path.basename(output_path),
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                )
-
-            except Exception as e:
-
-                st.error("❌ Có lỗi trong quá trình OCR / Dịch ảnh.")
-
-                st.exception(e)
