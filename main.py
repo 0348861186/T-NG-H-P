@@ -1665,4 +1665,3 @@ st.caption(
     "Hệ thống giữ nguyên logic dịch song ngữ của code gốc, "
     "đồng thời tự nhận diện định dạng file và ngôn ngữ."
 )
-```
