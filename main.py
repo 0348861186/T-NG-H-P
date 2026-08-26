@@ -1,17 +1,37 @@
+import io
+import streamlit as st
+
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.page import PageMargins
 
-out = "/mnt/data/Bang_cham_cong_2026-08-26_Trung_Viet.xlsx"
 
-wb = Workbook()
-ws = wb.active
-ws.title = "Bảng song ngữ"
+# ============================================================
+# CẤU HÌNH STREAMLIT
+# ============================================================
 
-# --- Data translated Chinese -> Vietnamese ---
+st.set_page_config(
+    page_title="Bảng chấm công Trung - Việt",
+    page_icon="📊",
+    layout="centered"
+)
+
+
+# ============================================================
+# TIÊU ĐỀ
+# ============================================================
+
+st.title("📊 Bảng chấm công Trung - Việt")
+st.caption("2026年8月26日员工上班 / Nhân viên đi làm ngày 26/08/2026")
+
+
+# ============================================================
+# DỮ LIỆU BẢNG
+# ============================================================
+
 title_cn = "2026 年 8 月 26 日员工上班"
 title_vi = "Nhân viên đi làm ngày 26/08/2026"
+
 
 headers = [
     ("STT", "STT"),
@@ -21,6 +41,17 @@ headers = [
     ("临时工", "Công nhân thời vụ"),
     ("备注", "Ghi chú"),
 ]
+
+
+# ------------------------------------------------------------
+# Dữ liệu:
+# STT,
+# (Tiếng Trung, Tiếng Việt),
+# Số máy,
+# Chính thức,
+# Thời vụ,
+# Ghi chú
+# ------------------------------------------------------------
 
 rows = [
     (1, ("连机", "Máy liên kết"), 5, 3, 2, ""),
@@ -37,99 +68,539 @@ rows = [
     (12, ("办公室", "Văn phòng"), "", 4, "", ""),
     (13, ("QC", "QC"), "", 2, "", ""),
     (14, ("阿秋，阿勇", "A Qiu, A Yong"), "", 2, "", ""),
-    (15, ("临时工", "Công nhân thời vụ"), "MERGE_4", "", "", ""),
-    (15, ("新临时工", "Công nhân thời vụ mới"), "MERGE_2", "", "", ""),
 ]
 
-# --- Layout ---
-ws.merge_cells("A1:F1")
-ws["A1"] = f"{title_cn}\n{title_vi}"
-ws.row_dimensions[1].height = 42
 
-# Header row
-for col, (cn, vi) in enumerate(headers, 1):
-    cell = ws.cell(row=2, column=col)
-    cell.value = cn if cn == vi else f"{cn}\n{vi}"
-    cell.font = Font(name="Microsoft YaHei", size=11, bold=True)
-    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    cell.fill = PatternFill("solid", fgColor="ED7D00")
+# ============================================================
+# HÀM TẠO FILE EXCEL
+# ============================================================
 
-ws.row_dimensions[2].height = 36
+def create_excel():
 
-# Body rows
-start_row = 3
-for i, (stt, dept, machines, formal, temp, remark) in enumerate(rows, start_row):
-    ws.cell(i, 1, stt)
-    ws.cell(i, 2, f"{dept[0]}\n{dept[1]}")
-    if machines != "MERGE_4" and machines != "MERGE_2":
-        ws.cell(i, 3, machines)
-        ws.cell(i, 4, formal)
-        ws.cell(i, 5, temp)
-    ws.cell(i, 6, f"{remark[0]}\n{remark[1]}" if isinstance(remark, tuple) else remark)
+    # --------------------------------------------------------
+    # Tạo workbook
+    # --------------------------------------------------------
 
-    for c in range(1, 7):
-        ws.cell(i, c).font = Font(name="Microsoft YaHei", size=10)
-        ws.cell(i, c).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    ws.row_dimensions[i].height = 32
+    wb = Workbook()
 
-# Merge the C:E cells for the two temporary-worker rows, matching the image
-ws.merge_cells(start_row=17, start_column=3, end_row=17, end_column=5)
-ws["C17"] = 4
-ws["C17"].alignment = Alignment(horizontal="center", vertical="center")
-ws.merge_cells(start_row=18, start_column=3, end_row=18, end_column=5)
-ws["C18"] = 2
-ws["C18"].alignment = Alignment(horizontal="center", vertical="center")
+    ws = wb.active
+    ws.title = "Bảng song ngữ"
 
-# Remark "套袋" is vertically centered across rows 15-16
-ws.merge_cells("F17:F18")
-ws["F17"] = "套袋\nĐóng túi"
-ws["F17"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-# Total row
-ws.merge_cells("A19:B19")
-ws["A19"] = "一共\nTổng cộng"
-ws.merge_cells("C19:E19")
-ws["C19"] = 42
-ws["A19"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-ws["C19"].alignment = Alignment(horizontal="center", vertical="center")
-ws.row_dimensions[19].height = 34
+    # --------------------------------------------------------
+    # FONT
+    # --------------------------------------------------------
 
-# Borders for all cells, including merged areas
-thin = Side(style="thin", color="000000")
-border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    font_name = "Microsoft YaHei"
 
-for row in ws.iter_rows(min_row=1, max_row=19, min_col=1, max_col=6):
-    for cell in row:
+
+    # --------------------------------------------------------
+    # MÀU HEADER
+    # --------------------------------------------------------
+
+    orange_fill = PatternFill(
+        fill_type="solid",
+        fgColor="ED7D00"
+    )
+
+
+    # --------------------------------------------------------
+    # BORDER
+    # --------------------------------------------------------
+
+    thin_side = Side(
+        style="thin",
+        color="000000"
+    )
+
+    border = Border(
+        left=thin_side,
+        right=thin_side,
+        top=thin_side,
+        bottom=thin_side
+    )
+
+
+    # ========================================================
+    # TIÊU ĐỀ
+    # ========================================================
+
+    ws.merge_cells("A1:F1")
+
+    ws["A1"] = (
+        f"{title_cn}\n"
+        f"{title_vi}"
+    )
+
+    ws["A1"].font = Font(
+        name=font_name,
+        size=13,
+        bold=True
+    )
+
+    ws["A1"].alignment = Alignment(
+        horizontal="center",
+        vertical="center",
+        wrap_text=True
+    )
+
+    ws.row_dimensions[1].height = 42
+
+
+    # ========================================================
+    # HEADER
+    # ========================================================
+
+    for col, (cn, vi) in enumerate(headers, start=1):
+
+        cell = ws.cell(
+            row=2,
+            column=col
+        )
+
+        # Nếu giống nhau thì chỉ hiển thị 1 lần
+        if cn == vi:
+            cell.value = cn
+        else:
+            cell.value = f"{cn}\n{vi}"
+
+        cell.font = Font(
+            name=font_name,
+            size=10,
+            bold=True
+        )
+
+        cell.alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+            wrap_text=True
+        )
+
+        cell.fill = orange_fill
         cell.border = border
 
-# Reapply border to merged-region anchors and edges
-for rng in ["A1:F1", "A19:B19", "C19:E19", "C17:E17", "C18:E18", "F17:F18"]:
-    # openpyxl preserves the merged structure; anchor formatting is enough for content,
-    # and the surrounding cells already carry borders.
-    pass
+    ws.row_dimensions[2].height = 38
 
-# Column widths approximating the source image
-widths = {"A": 8, "B": 24, "C": 14, "D": 16, "E": 16, "F": 18}
-for col, width in widths.items():
-    ws.column_dimensions[col].width = width
 
-# Title styling
-ws["A1"].font = Font(name="Microsoft YaHei", size=13, bold=True)
-ws["A1"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    # ========================================================
+    # DÒNG DỮ LIỆU
+    # ========================================================
 
-# Print / page setup
-ws.sheet_view.showGridLines = False
-ws.freeze_panes = "A3"
-ws.page_setup.orientation = "landscape"
-ws.page_setup.fitToWidth = 1
-ws.page_setup.fitToHeight = 1
-ws.sheet_properties.pageSetUpPr.fitToPage = True
-ws.page_margins = PageMargins(left=0.2, right=0.2, top=0.3, bottom=0.3, header=0.1, footer=0.1)
+    current_row = 3
 
-# Make the total visually bold
-for cell_ref in ["A19", "C19"]:
-    ws[cell_ref].font = Font(name="Microsoft YaHei", size=11, bold=True)
+    for stt, dept, machines, formal, temp, remark in rows:
 
-wb.save(out)
+        # STT
+        ws.cell(
+            row=current_row,
+            column=1,
+            value=stt
+        )
 
-print(f"Đã tạo file Excel song ngữ: {out}")
+        # Bộ phận
+        ws.cell(
+            row=current_row,
+            column=2,
+            value=f"{dept[0]}\n{dept[1]}"
+        )
+
+        # Số máy
+        ws.cell(
+            row=current_row,
+            column=3,
+            value=machines
+        )
+
+        # Công nhân chính thức
+        ws.cell(
+            row=current_row,
+            column=4,
+            value=formal
+        )
+
+        # Công nhân thời vụ
+        ws.cell(
+            row=current_row,
+            column=5,
+            value=temp
+        )
+
+        # Ghi chú
+        ws.cell(
+            row=current_row,
+            column=6,
+            value=remark
+        )
+
+        # Style
+        for col in range(1, 7):
+
+            cell = ws.cell(
+                row=current_row,
+                column=col
+            )
+
+            cell.font = Font(
+                name=font_name,
+                size=10
+            )
+
+            cell.alignment = Alignment(
+                horizontal="center",
+                vertical="center",
+                wrap_text=True
+            )
+
+            cell.border = border
+
+        ws.row_dimensions[current_row].height = 32
+
+        current_row += 1
+
+
+    # ========================================================
+    # 2 DÒNG CUỐI:
+    #
+    # 15 临时工
+    # 15 新临时工
+    #
+    # C:E được gộp theo hình ảnh gốc
+    # ========================================================
+
+    row_15_old = current_row
+    row_15_new = current_row + 1
+
+
+    # --------------------------------------------------------
+    # Dòng 15 - Công nhân thời vụ
+    # --------------------------------------------------------
+
+    ws.cell(
+        row=row_15_old,
+        column=1,
+        value=15
+    )
+
+    ws.cell(
+        row=row_15_old,
+        column=2,
+        value="临时工\nCông nhân thời vụ"
+    )
+
+
+    # Gộp C:E
+    ws.merge_cells(
+        start_row=row_15_old,
+        start_column=3,
+        end_row=row_15_old,
+        end_column=5
+    )
+
+    ws.cell(
+        row=row_15_old,
+        column=3,
+        value=4
+    )
+
+
+    # --------------------------------------------------------
+    # Dòng 15 - Công nhân thời vụ mới
+    # --------------------------------------------------------
+
+    ws.cell(
+        row=row_15_new,
+        column=1,
+        value=15
+    )
+
+    ws.cell(
+        row=row_15_new,
+        column=2,
+        value="新临时工\nCông nhân thời vụ mới"
+    )
+
+
+    # Gộp C:E
+    ws.merge_cells(
+        start_row=row_15_new,
+        start_column=3,
+        end_row=row_15_new,
+        end_column=5
+    )
+
+    ws.cell(
+        row=row_15_new,
+        column=3,
+        value=2
+    )
+
+
+    # --------------------------------------------------------
+    # Ghi chú 套袋 / Đóng túi
+    # --------------------------------------------------------
+
+    ws.merge_cells(
+        start_row=row_15_old,
+        start_column=6,
+        end_row=row_15_new,
+        end_column=6
+    )
+
+    ws.cell(
+        row=row_15_old,
+        column=6,
+        value="套袋\nĐóng túi"
+    )
+
+
+    # --------------------------------------------------------
+    # Style cho 2 dòng cuối
+    # --------------------------------------------------------
+
+    for row in [row_15_old, row_15_new]:
+
+        ws.row_dimensions[row].height = 36
+
+        for col in range(1, 7):
+
+            cell = ws.cell(
+                row=row,
+                column=col
+            )
+
+            cell.font = Font(
+                name=font_name,
+                size=10
+            )
+
+            cell.alignment = Alignment(
+                horizontal="center",
+                vertical="center",
+                wrap_text=True
+            )
+
+            cell.border = border
+
+
+    # ========================================================
+    # TỔNG CỘNG
+    # ========================================================
+
+    total_row = row_15_new + 1
+
+
+    # Gộp A:B
+    ws.merge_cells(
+        start_row=total_row,
+        start_column=1,
+        end_row=total_row,
+        end_column=2
+    )
+
+    ws.cell(
+        row=total_row,
+        column=1,
+        value="一共\nTổng cộng"
+    )
+
+
+    # Gộp C:E
+    ws.merge_cells(
+        start_row=total_row,
+        start_column=3,
+        end_row=total_row,
+        end_column=5
+    )
+
+    ws.cell(
+        row=total_row,
+        column=3,
+        value=42
+    )
+
+
+    # --------------------------------------------------------
+    # Style tổng
+    # --------------------------------------------------------
+
+    for col in range(1, 7):
+
+        cell = ws.cell(
+            row=total_row,
+            column=col
+        )
+
+        cell.font = Font(
+            name=font_name,
+            size=11,
+            bold=True
+        )
+
+        cell.alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+            wrap_text=True
+        )
+
+        cell.border = border
+
+    ws.row_dimensions[total_row].height = 36
+
+
+    # ========================================================
+    # ĐỘ RỘNG CỘT
+    # ========================================================
+
+    ws.column_dimensions["A"].width = 8
+    ws.column_dimensions["B"].width = 24
+    ws.column_dimensions["C"].width = 14
+    ws.column_dimensions["D"].width = 17
+    ws.column_dimensions["E"].width = 17
+    ws.column_dimensions["F"].width = 18
+
+
+    # ========================================================
+    # CÀI ĐẶT TRANG IN
+    # ========================================================
+
+    ws.sheet_view.showGridLines = False
+
+    ws.freeze_panes = "A3"
+
+    ws.page_setup.orientation = "landscape"
+
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 1
+
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+
+    ws.page_margins = PageMargins(
+        left=0.2,
+        right=0.2,
+        top=0.3,
+        bottom=0.3,
+        header=0.1,
+        footer=0.1
+    )
+
+
+    # ========================================================
+    # GHI WORKBOOK VÀO RAM
+    #
+    # QUAN TRỌNG:
+    # Không dùng:
+    #
+    # wb.save("/mnt/data/...")
+    #
+    # Vì Streamlit Cloud có thể không có thư mục đó.
+    # ========================================================
+
+    output = io.BytesIO()
+
+    wb.save(output)
+
+    output.seek(0)
+
+    return output
+
+
+# ============================================================
+# HIỂN THỊ PREVIEW DỮ LIỆU TRÊN STREAMLIT
+# ============================================================
+
+st.subheader("📋 Nội dung bảng")
+
+preview_data = []
+
+for stt, dept, machines, formal, temp, remark in rows:
+
+    preview_data.append(
+        {
+            "STT": stt,
+            "部门 / Bộ phận": f"{dept[0]} / {dept[1]}",
+            "开几台机 / Số máy": machines,
+            "正式工 / Chính thức": formal,
+            "临时工 / Thời vụ": temp,
+        }
+    )
+
+preview_data.extend(
+    [
+        {
+            "STT": 15,
+            "部门 / Bộ phận": "临时工 / Công nhân thời vụ",
+            "开几台机 / Số máy": "",
+            "正式工 / Chính thức": "",
+            "临时工 / Thời vụ": 4,
+        },
+        {
+            "STT": 15,
+            "部门 / Bộ phận": "新临时工 / Công nhân thời vụ mới",
+            "开几台机 / Số máy": "",
+            "正式工 / Chính thức": "",
+            "临时工 / Thời vụ": 2,
+        },
+    ]
+)
+
+st.dataframe(
+    preview_data,
+    use_container_width=True,
+    hide_index=True
+)
+
+
+# ============================================================
+# NÚT TẠO + DOWNLOAD EXCEL
+# ============================================================
+
+st.divider()
+
+st.subheader("📥 Xuất Excel")
+
+if st.button(
+    "🔄 Tạo file Excel",
+    use_container_width=True
+):
+
+    excel_file = create_excel()
+
+    st.download_button(
+        label="⬇️ 下载 Excel / Tải Excel",
+        data=excel_file.getvalue(),
+        file_name="Bang_cham_cong_2026-08-26_Trung_Viet.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True
+    )
+
+    st.success(
+        "Đã tạo file Excel thành công! "
+        "Nhấn nút '⬇️ 下载 Excel / Tải Excel' để tải xuống."
+    )
+
+
+# ============================================================
+# NÚT DOWNLOAD LUÔN HIỂN THỊ
+# ============================================================
+
+else:
+
+    excel_file = create_excel()
+
+    st.download_button(
+        label="⬇️ 下载 Excel / Tải Excel",
+        data=excel_file.getvalue(),
+        file_name="Bang_cham_cong_2026-08-26_Trung_Viet.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True
+    )
+
+
+# ============================================================
+# THÔNG TIN
+# ============================================================
+
+st.caption(
+    "Excel được tạo trực tiếp trong bộ nhớ RAM, "
+    "không sử dụng đường dẫn /mnt/data nên phù hợp với Streamlit Cloud."
+)
