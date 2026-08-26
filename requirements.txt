@@ -1,7 +1,12 @@
 streamlit
 openpyxl
 pandas
+xlrd
+pyxlsb
+odfpy
+Pillow
 easyocr
-opencv-python-headless
 deep-translator
-pillow
+numpy
+torch
+torchvision
