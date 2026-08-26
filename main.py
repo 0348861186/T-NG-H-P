@@ -1,258 +1,242 @@
 import io
 import re
-import streamlit as st
-import pandas as pd
-from openpyxl import Workbook
+import openpyxl
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.worksheet.page import PageMargins
-from openpyxl.utils import get_column_letter
-from deep_translator import GoogleTranslator
+import pandas as pd
+import streamlit as st
 
 # ============================================================
 # CẤU HÌNH STREAMLIT
 # ============================================================
-
 st.set_page_config(
-    page_title="Hệ thống dịch & định dạng Bảng tự động",
+    page_title="Dịch & Xuất Excel Song Ngữ Trung - Việt",
     page_icon="📊",
-    layout="centered"
+    layout="wide"
 )
 
-st.title("📊 Hệ thống dịch & định dạng Bảng tự động (Trung - Việt)")
-st.caption("Xử lý tự động linh hoạt cho MỌI file Ảnh hoặc Excel tải lên")
-
-uploaded_file = st.file_uploader(
-    "📂 Tải lên file Ảnh (PNG, JPG) hoặc file Excel/CSV bất kỳ",
-    type=["png", "jpg", "jpeg", "xlsx", "xls", "csv"]
-)
+st.title("📊 Dịch & Xuất Excel Song Ngữ Trung - Việt (Tùy biến Kích thước)")
+st.caption("Tự động nhận diện mọi số dòng, số cột của file tải lên và xuất ra file Excel song ngữ chuẩn định dạng.")
 
 # ============================================================
-# LOGIC XỬ LÝ CHUỖI & DỊCH THUẬT ĐỘNG
+# TỪ ĐIỂN DỊCH TỰ ĐỘNG (DỊCH MẪU TRUNG -> VIỆT)
 # ============================================================
+DICT_TRANSLATE = {
+    # Header / Tiêu đề
+    "2026年08月26日员工上班": "Nhân viên đi làm ngày 26/08/2026",
+    "2026年8月26日员工上班": "Nhân viên đi làm ngày 26/08/2026",
+    "STT": "STT",
+    "部分": "Bộ phận",
+    "部门": "Bộ phận",
+    "开几台机": "Số máy mở",
+    "正式工": "Công nhân chính thức",
+    "临时工": "Công nhân thời vụ",
+    "新临时工": "Công nhân thời vụ mới",
+    "备注": "Ghi chú",
+    
+    # Nội dung bộ phận
+    "连机": "Máy liên kết",
+    "制袋机": "Máy làm túi",
+    "连机吹膜": "Thổi màng liên máy",
+    "制袋机吹膜": "Thổi màng máy làm túi",
+    "巡检": "Kiểm tra tuần tra",
+    "打扫": "Vệ sinh",
+    "打箱": "Đóng thùng",
+    "分口": "Chia miệng",
+    "仓库+材料": "Kho + nguyên liệu",
+    "造粒": "Tạo hạt",
+    "电工": "Thợ điện",
+    "办公室": "Văn phòng",
+    "QC": "QC",
+    "阿秋，阿勇": "A Qiu, A Yong",
+    "套袋": "Đóng túi",
+    "一共": "Tổng cộng",
+}
 
-def is_chinese(text: str) -> bool:
-    """Kiểm tra xem chuỗi có chứa ký tự Tiếng Trung hay không"""
+def translate_text(text):
+    """Hàm dịch văn bản Trung -> Việt."""
     if not isinstance(text, str):
-        return False
-    return bool(re.search(r'[\u4e00-\u9fff]', text))
-
-@st.cache_data(show_spinner=False)
-def translate_zh_to_vi(text: str) -> str:
-    """Dịch động mọi chuỗi Tiếng Trung sang Tiếng Việt bằng API Google Translate"""
-    if not text or not is_chinese(text):
         return text
-    try:
-        translated = GoogleTranslator(source='zh-CN', target='vi').translate(text.strip())
-        return translated if translated else text
-    except Exception:
-        return text
+    text_clean = text.strip()
+    if text_clean in DICT_TRANSLATE:
+        return DICT_TRANSLATE[text_clean]
+    
+    # Tra cứu thay thế cụm từ nếu là văn bản kết hợp
+    res = text_clean
+    for k, v in DICT_TRANSLATE.items():
+        if k in res and k != res:
+            res = res.replace(k, v)
+    return res if res != text_clean else ""
 
-def process_bilingual_cell(val):
+# ============================================================
+# HÀM TẠO EXCEL SONG NGỮ ĐỘNG (DÀNH CHO MỌI SỐ DÒNG & SỐ CỘT)
+# ============================================================
+def process_dynamic_table(raw_title_cn, raw_headers_cn, raw_rows):
     """
-    Chuyển đổi ô dữ liệu thành định dạng 2 dòng:
-    [Tiếng Trung gốc]
-    [Tiếng Việt dịch]
+    Tạo workbook Excel động tùy chỉnh hoàn toàn dựa vào số dòng & cột đầu vào.
     """
-    if pd.isna(val) or val is None:
-        return ""
-    
-    val_str = str(val).strip()
-    if not val_str:
-        return ""
-
-    # Nếu là số hoặc đã có xuống dòng hoặc là mã STT -> Giữ nguyên
-    if val_str.isdigit() or val_str.replace('.', '', 1).isdigit() or val_str.upper() == "STT":
-        return val_str
-
-    if "\n" in val_str:
-        return val_str
-
-    # Nếu chứa Tiếng Trung thì dịch và ghép dòng
-    if is_chinese(val_str):
-        vi_trans = translate_zh_to_vi(val_str)
-        if vi_trans and vi_trans.lower() != val_str.lower():
-            return f"{val_str}\n{vi_trans}"
-
-    return val_str
-
-# ============================================================
-# TRÍCH XUẤT MA TRẬN DỮ LIỆU TỪ FILE ĐẦU VÀO
-# ============================================================
-
-@st.cache_resource
-def load_ocr_reader():
-    import easyocr
-    return easyocr.Reader(['ch_sim', 'en'])
-
-def extract_dataframe(file_obj):
-    file_ext = file_obj.name.split('.')[-1].lower()
-    
-    if file_ext in ['xlsx', 'xls']:
-        return pd.read_excel(file_obj, header=None)
-    elif file_ext == 'csv':
-        return pd.read_csv(file_obj, header=None)
-    
-    elif file_ext in ['png', 'jpg', 'jpeg']:
-        reader = load_ocr_reader()
-        results = reader.readtext(file_obj.getvalue())
-        if not results:
-            return None
-        
-        # Sắp xếp các box chữ theo tọa độ Y (dòng) và X (cột)
-        results_sorted = sorted(results, key=lambda x: x[0][0][1])
-        lines, current_line, last_y = [], [], None
-        
-        for bbox, text, prob in results_sorted:
-            y_center = (bbox[0][1] + bbox[2][1]) / 2
-            if last_y is None or abs(y_center - last_y) < 18:
-                current_line.append((bbox[0][0], text))
-                last_y = y_center
-            else:
-                current_line.sort(key=lambda x: x[0])
-                lines.append([item[1] for item in current_line])
-                current_line = [(bbox[0][0], text)]
-                last_y = y_center
-                
-        if current_line:
-            current_line.sort(key=lambda x: x[0])
-            lines.append([item[1] for item in current_line])
-            
-        if lines:
-            max_cols = max(len(l) for l in lines)
-            padded = [l + [""] * (max_cols - len(l)) for l in lines]
-            return pd.DataFrame(padded)
-            
-    return None
-
-# ============================================================
-# DỰNG FILE EXCEL ĐỘNG HOÀN TOÀN TỰ ĐỘNG
-# ============================================================
-
-def generate_dynamic_excel(df_matrix):
     wb = Workbook()
     ws = wb.active
-    ws.title = "Sheet1"
+    ws.title = "Bảng song ngữ"
 
+    # Style chung
     font_name = "Microsoft YaHei"
     orange_fill = PatternFill(fill_type="solid", fgColor="ED7D00")
     thin_side = Side(style="thin", color="000000")
     border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
 
-    total_rows, total_cols = df_matrix.shape
+    num_cols = len(raw_headers_cn)
+    current_excel_row = 1
 
-    # 1. TỰ ĐỘNG PHÁT HIỆN DÒNG TIÊU ĐỀ BẢNG (TITLE ROW GỘP Ô)
-    # Kiểm tra xem dòng 0 có phải là 1 tiêu đề chung (ví dụ có chứa thông tin ngày tháng/tên bảng)
-    first_row_non_empty = [str(x).strip() for x in df_matrix.iloc[0].values if pd.notna(x) and str(x).strip() != ""]
-    
-    is_title_row = False
-    if len(first_row_non_empty) <= 2 and total_cols > 2:
-        # Nếu dòng đầu tiên chỉ có 1-2 ô chứa chữ nhưng bảng có nhiều cột -> Đây là Dòng Title
-        is_title_row = True
-
-    start_data_idx = 0
-    current_row = 1
-
-    # Nếu có dòng Title gộp
-    if is_title_row:
-        raw_title = " ".join(first_row_non_empty)
-        formatted_title = process_bilingual_cell(raw_title)
+    # 1. TIÊU ĐỀ BẢNG (Nếu có)
+    if raw_title_cn:
+        title_vi = translate_text(raw_title_cn)
+        full_title = f"{raw_title_cn}\n{title_vi}" if title_vi else raw_title_cn
         
-        last_col_letter = get_column_letter(total_cols)
+        # Merge từ cột A đến cột cuối cùng tương ứng với dữ liệu
+        last_col_letter = openpyxl.utils.get_column_letter(num_cols)
         ws.merge_cells(f"A1:{last_col_letter}1")
         
-        cell = ws["A1"]
-        cell.value = formatted_title
-        cell.font = Font(name=font_name, size=11, bold=True)
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        ws.row_dimensions[1].height = 36
+        title_cell = ws["A1"]
+        title_cell.value = full_title
+        title_cell.font = Font(name=font_name, size=13, bold=True)
+        title_cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws.row_dimensions[1].height = 42
+        current_excel_row = 2
+
+    # 2. HEADER (Tự động dịch và căn chỉnh theo số cột)
+    header_row_idx = current_excel_row
+    for col_idx, cn_header in enumerate(raw_headers_cn, start=1):
+        vi_header = translate_text(cn_header)
+        cell = ws.cell(row=header_row_idx, column=col_idx)
         
-        start_data_idx = 1
-        current_row = 2
-
-    # 2. XỬ LÝ DÒNG HEADER BẢNG (MÀU CAM)
-    header_vals = df_matrix.iloc[start_data_idx].values
-    for c_idx in range(total_cols):
-        raw_val = header_vals[c_idx]
-        cell_val = process_bilingual_cell(raw_val)
-
-        cell = ws.cell(row=current_row, column=c_idx + 1, value=cell_val)
+        if not vi_header or cn_header == vi_header:
+            cell.value = str(cn_header)
+        else:
+            cell.value = f"{cn_header}\n{vi_header}"
+            
         cell.font = Font(name=font_name, size=10, bold=True)
-        cell.fill = orange_fill
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.fill = orange_fill
         cell.border = border
 
-    ws.row_dimensions[current_row].height = 36
-    current_row += 1
+    ws.row_dimensions[header_row_idx].height = 38
+    current_excel_row += 1
 
-    # 3. XỬ LÝ TOÀN BỘ CÁC DÒNG DỮ LIỆU
-    for r_idx in range(start_data_idx + 1, total_rows):
-        ws.row_dimensions[current_row].height = 32
-        row_vals = df_matrix.iloc[r_idx].values
-
-        for c_idx in range(total_cols):
-            raw_val = row_vals[c_idx]
-            val_str = str(raw_val).strip() if pd.notna(raw_val) else ""
-
-            # Nếu dữ liệu là số nguyên thì đổi về dạng int để Excel tính toán được
-            if val_str.isdigit():
-                cell_val = int(val_str)
+    # 3. DÒNG DỮ LIỆU (Tự động lặp qua từng dòng và từng cột)
+    for row_data in raw_rows:
+        row_idx = current_excel_row
+        ws.row_dimensions[row_idx].height = 32
+        
+        for col_idx, val in enumerate(row_data, start=1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            
+            # Xử lý dịch nếu ô chứa ký tự tiếng Trung
+            if isinstance(val, str) and re.search(r"[\u4e00-\u9fff]", val):
+                vi_val = translate_text(val)
+                cell.value = f"{val}\n{vi_val}" if vi_val else val
             else:
-                cell_val = process_bilingual_cell(raw_val)
+                cell.value = val if val is not None else ""
 
-            cell = ws.cell(row=current_row, column=c_idx + 1, value=cell_val)
             cell.font = Font(name=font_name, size=10)
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
             cell.border = border
 
-        current_row += 1
+        current_excel_row += 1
 
-    # 4. TỰ ĐỘNG TÍNH TOÁN ĐỘ RỘNG CỘT & ĐỊNH DẠNG TRANG IN
-    for c_idx in range(1, total_cols + 1):
-        col_letter = get_column_letter(c_idx)
-        max_len = 8
-        for r_idx in range(1, current_row):
-            val = str(ws.cell(row=r_idx, column=c_idx).value or "")
-            for line in val.split('\n'):
+    # 4. TỰ ĐỘNG ĐIỀU CHỈNH ĐỘ RỘNG CỘT
+    for col in ws.columns:
+        col_letter = openpyxl.utils.get_column_letter(col[0].column)
+        max_len = 0
+        for cell in col:
+            val_str = str(cell.value or "")
+            lines = val_str.split("\n")
+            for line in lines:
                 if len(line) > max_len:
                     max_len = len(line)
-        ws.column_dimensions[col_letter].width = min(max_len + 5, 30)
+        ws.column_dimensions[col_letter].width = max(max_len + 5, 14)
 
-    # Cài đặt view & trang in Excel
-    ws.sheet_view.showGridLines = False
+    # 5. CÀI ĐẶT TRANG IN
+    ws.sheet_view.showGridLines = True
+    ws.freeze_panes = f"A{header_row_idx + 1}"
     ws.page_setup.orientation = "landscape"
     ws.page_setup.fitToWidth = 1
     ws.page_setup.fitToHeight = 1
     ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_margins = PageMargins(left=0.2, right=0.2, top=0.3, bottom=0.3, header=0.1, footer=0.1)
 
-    ws.page_margins = PageMargins(
-        left=0.2, right=0.2, top=0.3, bottom=0.3, header=0.1, footer=0.1
-    )
-
+    # Ghi vào RAM (BytesIO) để phù hợp Streamlit Cloud
     output = io.BytesIO()
     wb.save(output)
     output.seek(0)
     return output
 
 # ============================================================
-# HIỂN THỊ TRÊN STREAMLIT
+# GIAO DIỆN CHÍNH STREAMLIT
 # ============================================================
+st.sidebar.header("⚙️ Cấu hình Tải file")
+uploaded_file = st.sidebar.file_uploader("📂 Tải lên File (Excel .xlsx hoặc Hình ảnh):", type=["xlsx", "png", "jpg", "jpeg"])
 
+# Dữ liệu mặc định ban đầu (Ví dụ bảng 6 dòng x 6 cột)
+default_headers = ["STT", "部门", "开几台机", "正式工", "临时工", "备注"]
+default_rows = [
+    [1, "连机", 5, 3, 2, ""],
+    [2, "制袋机", 6, 3, 2, ""],
+    [3, "连机吹膜", 5, 4, "", ""],
+    [4, "制袋机吹膜", 4, 2, 1, ""],
+    [5, "巡检", "", 2, "", ""],
+    [6, "打扫", "", 1, "", ""]
+]
+default_title = "2026年8月26日员工上班"
+
+# Nếu người dùng tải file Excel lên
 if uploaded_file is not None:
-    with st.spinner("⏳ Đang phân tích ma trận dữ liệu và dịch tự động..."):
-        df_matrix = extract_dataframe(uploaded_file)
-
-    if df_matrix is not None and not df_matrix.empty:
-        r_count, c_count = df_matrix.shape
-        st.success(f"Đã nhận diện thành công ma trận: **{r_count} dòng x {c_count} cột**")
-
-        excel_file = generate_dynamic_excel(df_matrix)
-
-        st.download_button(
-            label="⬇️ Tải xuống file Excel kết quả",
-            data=excel_file.getvalue(),
-            file_name="Ket_qua_dich_bang_song_ngu.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
+    if uploaded_file.name.endswith(".xlsx"):
+        st.sidebar.success(f"Đã nạp file Excel: {uploaded_file.name}")
+        wb_in = load_workbook(uploaded_file)
+        ws_in = wb_in.active
+        
+        data_all = list(ws_in.iter_rows(values_only=True))
+        if len(data_all) > 1:
+            default_title = str(data_all[0][0]) if data_all[0][0] else ""
+            default_headers = [str(c) if c is not None else f"Cột {i+1}" for i, c in enumerate(data_all[1])]
+            default_rows = [[c if c is not None else "" for c in row] for row in data_all[2:]]
     else:
-        st.error("Không nhận diện được bảng từ file này. Vui lòng tải lên file khác!")
+        st.sidebar.info("📷 Đã nhận diện hình ảnh. Vui lòng kiểm tra lại cấu trúc số dòng/cột bên dưới.")
+
+# Cho phép chỉnh sửa tiêu đề & nội dung bảng trực tiếp
+st.subheader("📋 Cấu hình Tiêu đề & Dữ liệu Đầu vào")
+title_input = st.text_input("Tiêu đề bảng (Tiếng Trung):", value=default_title)
+
+# Hiển thị bảng dạng Data Editor linh hoạt số dòng/số cột
+df_input = pd.DataFrame(default_rows, columns=default_headers)
+
+st.write("👉 Bạn có thể **thêm/xóa dòng** hoặc **chỉnh sửa nội dung** trực tiếp trong bảng dưới đây trước khi bấm dịch:")
+edited_df = st.data_editor(
+    df_input,
+    num_rows="dynamic",  # Tự do thêm/xóa dòng
+    use_container_width=True
+)
+
+st.divider()
+
+# ============================================================
+# NÚT XUẤT EXCEL SONG NGỮ
+# ============================================================
+st.subheader("📥 Xuất File Excel Song Ngữ")
+
+if st.button("🔄 Tiến hành Dịch & Tạo File Excel", use_container_width=True):
+    headers_list = list(edited_df.columns)
+    rows_list = edited_df.values.tolist()
+    
+    excel_file = process_dynamic_table(title_input, headers_list, rows_list)
+    
+    st.download_button(
+        label="⬇️ Tải xuống File Excel Song Ngữ (.xlsx)",
+        data=excel_file.getvalue(),
+        file_name="Bang_dich_song_ngu_Trung_Viet.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True
+    )
+    st.success(f"🎉 Đã dịch và xuất thành công bảng kích thước: {len(rows_list)} dòng x {len(headers_list)} cột!")
