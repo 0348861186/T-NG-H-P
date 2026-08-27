@@ -23,13 +23,18 @@ st.set_page_config(
 st.title("🤖 Dịch & Xuất Bảng Chấm Công Song Ngữ (Sử dụng Thư viện Dịch / Không tốn Quota)")
 st.caption("Hỗ trợ chọn chế độ Trung ➔ Việt hoặc Việt ➔ Trung | Giữ nguyên 100% format Excel gốc hoặc OCR từ Ảnh/PDF.")
 
-# Khởi tạo EasyOCR reader (cache để không tốn thời gian load lại)
+# ============================================================
+# TẠO 2 READER RIÊNG BIỆT CHO TRUNG VÀ VIỆT (TRÁNH LỖI VALUEERROR)
+# ============================================================
 @st.cache_resource
-def load_ocr_reader():
-    # Load ngôn ngữ tiếng Trung (giản thể), tiếng Việt và tiếng Anh
-    return easyocr.Reader(['ch_sim', 'vi', 'en'], gpu=False)
+def load_ocr_reader_zh():
+    """Model OCR chuyên cho Tiếng Trung + Tiếng Anh"""
+    return easyocr.Reader(['ch_sim', 'en'], gpu=False)
 
-reader = load_ocr_reader()
+@st.cache_resource
+def load_ocr_reader_vi():
+    """Model OCR chuyên cho Tiếng Việt + Tiếng Anh"""
+    return easyocr.Reader(['vi', 'en'], gpu=False)
 
 # ============================================================
 # 1. BỘ LỌC HƯỚNG DỊCH & TẢI FILE
@@ -63,7 +68,7 @@ def has_vietnamese(text):
     return bool(re.search(vietnamese_pattern, text, re.IGNORECASE))
 
 # ============================================================
-# HÀM DỊCH SỬ DỤNG THƯ VIỆN DEEP-TRANSLATOR (Google Translator Backend)
+# HÀM DỊCH SỬ DỤNG THƯ VIỆN DEEP-TRANSLATOR
 # ============================================================
 def translate_text_list(text_list, mode):
     """
@@ -80,7 +85,7 @@ def translate_text_list(text_list, mode):
             translated = translator.translate(text)
             translation_dict[text] = translated
         except Exception as e:
-            translation_dict[text] = text  # Mặc định giữ nguyên nếu lỗi dịch
+            translation_dict[text] = text  # Giữ nguyên nếu gặp lỗi kết nối
             
     return translation_dict
 
@@ -265,47 +270,56 @@ if uploaded_file is not None:
                     else:
                         img = Image.open(io.BytesIO(file_bytes))
                     
+                    # Lựa chọn Reader tương ứng dựa theo chế độ dịch
+                    if translation_mode == "Trung ➔ Việt":
+                        current_reader = load_ocr_reader_zh()
+                    else:
+                        current_reader = load_ocr_reader_vi()
+
                     # Đọc chữ từ ảnh
                     img_np = np.array(img)
-                    ocr_results = reader.readtext(img_np, detail=0)
+                    ocr_results = current_reader.readtext(img_np, detail=0)
                     
                     # Bóc tách chữ lấy được
                     extracted_texts = [text.strip() for text in ocr_results if text.strip()]
 
-                with st.spinner("2️⃣ Đang tự động dịch danh sách văn bản..."):
-                    translation_dict = translate_text_list(extracted_texts, translation_mode)
-                    
-                    # Dựng dữ liệu giả lập bảng từ kết quả OCR để tạo file Excel
-                    rows_data = []
-                    for idx, src_txt in enumerate(extracted_texts, 1):
-                        rows_data.append({
-                            "stt": idx,
-                            "dept_src": src_txt,
-                            "dept_tgt": translation_dict.get(src_txt, ""),
-                            "machines": "",
-                            "formal": "",
-                            "temp": "",
-                            "remark": ""
-                        })
+                if not extracted_texts:
+                    st.warning("Không tìm thấy văn bản nào trong ảnh/PDF!")
+                else:
+                    with st.spinner("2️⃣ Đang tự động dịch danh sách văn bản..."):
+                        translation_dict = translate_text_list(extracted_texts, translation_mode)
+                        
+                        # Dựng dữ liệu giả lập bảng từ kết quả OCR để tạo file Excel
+                        rows_data = []
+                        for idx, src_txt in enumerate(extracted_texts, 1):
+                            rows_data.append({
+                                "stt": idx,
+                                "dept_src": src_txt,
+                                "dept_tgt": translation_dict.get(src_txt, ""),
+                                "machines": "",
+                                "formal": "",
+                                "temp": "",
+                                "remark": ""
+                            })
 
-                    parsed_data = {
-                        "title_src": "BẢNG CHẤM CÔNG",
-                        "title_tgt": "考勤表",
-                        "date_str": datetime.date.today().strftime("%Y-%m-%d"),
-                        "rows": rows_data
-                    }
+                        parsed_data = {
+                            "title_src": "BẢNG CHẤM CÔNG",
+                            "title_tgt": "考勤表",
+                            "date_str": datetime.date.today().strftime("%Y-%m-%d"),
+                            "rows": rows_data
+                        }
 
-                with st.spinner("3️⃣ Đang dựng bảng Excel chuẩn đẹp..."):
-                    excel_bytes = build_excel_from_json(parsed_data, translation_mode)
+                    with st.spinner("3️⃣ Đang dựng bảng Excel chuẩn đẹp..."):
+                        excel_bytes = build_excel_from_json(parsed_data, translation_mode)
 
-                    st.success(f"✅ Đã quét chữ bằng OCR và chuyển đổi sang Excel ({translation_mode}) thành công!")
-                    st.download_button(
-                        label="⬇️ Tải Xuất File Excel (.xlsx)",
-                        data=excel_bytes.getvalue(),
-                        file_name=f"Bang_cham_cong_OCR_{parsed_data.get('date_str', 'export')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True
-                    )
+                        st.success(f"✅ Đã quét chữ bằng OCR và chuyển đổi sang Excel ({translation_mode}) thành công!")
+                        st.download_button(
+                            label="⬇️ Tải Xuất File Excel (.xlsx)",
+                            data=excel_bytes.getvalue(),
+                            file_name=f"Bang_cham_cong_OCR_{parsed_data.get('date_str', 'export')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                        )
 
         except Exception as e:
             st.error(f"❌ Xảy ra lỗi trong quá trình xử lý: {e}")
