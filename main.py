@@ -12,6 +12,9 @@ from openpyxl.worksheet.page import PageMargins
 from google import genai
 from google.genai import types
 
+# Thư viện dịch thuật miễn phí không dùng API Key / Quota
+from deep_translator import GoogleTranslator
+
 # ============================================================
 # CẤU HÌNH STREAMLIT
 # ============================================================
@@ -21,16 +24,19 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🤖 Dịch & Xuất Bảng Chấm Công Song Ngữ (Tự Động Retry chống lỗi 503)")
-st.caption("Hỗ trợ chọn chế độ Trung -> Việt hoặc Việt -> Trung | Giữ nguyên 100% format Excel gốc hoặc chuyển từ Ảnh/PDF.")
+st.title("🤖 Dịch & Xuất Bảng Chấm Công Song Ngữ (Hỗ trợ Dịch Miễn Phí Không Hết Quota)")
+st.caption("Cho phép chọn Dịch bằng AI (Gemini) hoặc Dịch Miễn Phí (Google Translate) khi hết Quota API.")
 
 # ============================================================
-# 1. CẤU HÌNH API KEY, BỘ LỌC HƯỚNG DỊCH & TẢI FILE
+# 1. CẤU HÌNH TÙY CHỌN DỊCH VÀ TẢI FILE
 # ============================================================
-col1, col2, col3 = st.columns([1, 1.2, 1.8])
+col1, col2, col3, col4 = st.columns([1.2, 1, 1, 1.8])
 
 with col1:
-    api_key = st.text_input("Nhập GEMINI_API_KEY:", type="password")
+    engine_choice = st.selectbox(
+        "Nguồn dịch (Engine):",
+        options=["Google Translate (Miễn phí/Không Quota)", "Gemini AI (Thông minh)"]
+    )
 
 with col2:
     translation_mode = st.radio(
@@ -40,8 +46,16 @@ with col2:
     )
 
 with col3:
+    api_key = st.text_input(
+        "GEMINI_API_KEY:", 
+        type="password", 
+        disabled=("Google Translate" in engine_choice),
+        help="Chỉ cần nhập khi chọn nguồn dịch là Gemini AI"
+    )
+
+with col4:
     uploaded_file = st.file_uploader(
-        "Tải lên Ảnh, PDF hoặc File Excel:", 
+        "Tải lên File Excel hoặc Ảnh/PDF:", 
         type=["png", "jpg", "jpeg", "pdf", "xlsx"]
     )
 
@@ -59,14 +73,31 @@ def has_vietnamese(text):
     return bool(re.search(vietnamese_pattern, text, re.IGNORECASE))
 
 # ============================================================
-# HÀM GỌI GEMINI API CÓ CƠ CHẾ CHỐNG LỖI 503 (RETRY & FALLBACK)
+# 2. HÀM DỊCH BẰNG GOOGLE TRANSLATE (KHÔNG CẦN QUOTA)
+# ============================================================
+def translate_free_batch(texts, mode):
+    """Dịch danh sách chuỗi bằng Google Translate Miễn Phí"""
+    src_lang = 'zh-CN' if mode == "Trung ➔ Việt" else 'vi'
+    tgt_lang = 'vi' if mode == "Trung ➔ Việt" else 'zh-CN'
+    
+    translator = GoogleTranslator(source=src_lang, target=tgt_lang)
+    translation_dict = {}
+    
+    for text in texts:
+        try:
+            # Dịch từng cụm từ
+            translated = translator.translate(text)
+            translation_dict[text] = translated
+        except Exception:
+            translation_dict[text] = text # Nếu lỗi thì giữ nguyên gốc
+            
+    return translation_dict
+
+# ============================================================
+# 3. HÀM GỌI GEMINI API (CÓ RETRY CHỐNG 503)
 # ============================================================
 def generate_content_with_retry(client, contents, max_retries=3):
-    """
-    Hàm gọi Gemini API tự động retry khi gặp lỗi 503 và tự động chuyển Model nếu quá tải
-    """
     models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
-    
     for model_name in models_to_try:
         for attempt in range(max_retries):
             try:
@@ -78,17 +109,13 @@ def generate_content_with_retry(client, contents, max_retries=3):
             except Exception as e:
                 err_msg = str(e)
                 if "503" in err_msg or "UNAVAILABLE" in err_msg or "429" in err_msg:
-                    wait_time = (attempt + 1) * 2  # Chờ 2s, 4s, 6s...
-                    st.warning(f"⚠️ Model {model_name} đang bận (Lỗi 503/429). Đang thử lại lần {attempt + 1}/{max_retries} sau {wait_time}s...")
+                    wait_time = (attempt + 1) * 2
                     time.sleep(wait_time)
                 else:
-                    # Nếu là lỗi khác (ví dụ sai API Key) thì throw lỗi ngay
                     raise e
-        st.info(f"🔄 Chuyển sang model dự phòng tiếp theo...")
-    
-    raise Exception("Tất cả các mô hình Gemini hiện đang bị quá tải. Vui lòng thử lại sau ít phút!")
+    raise Exception("Tất cả các mô hình Gemini hiện đang bận. Vui lòng thử chọn nguồn 'Google Translate (Miễn phí)'!")
 
-# Hàm tự tạo file Excel chuẩn đẹp nếu đọc từ Ảnh / PDF
+# Hàm tự tạo file Excel chuẩn đẹp từ JSON (Dùng cho Ảnh/PDF)
 def build_excel_from_json(data, mode):
     wb = Workbook()
     ws = wb.active
@@ -188,22 +215,24 @@ def build_excel_from_json(data, mode):
     return out
 
 # ============================================================
-# 2. XỬ LÝ DỊCH CHÍNH (PHÂN NHÁNH ẢNH / EXCEL + HƯỚNG DỊCH)
+# 4. XỬ LÝ DỊCH CHÍNH
 # ============================================================
 if uploaded_file is not None:
     is_excel = uploaded_file.name.lower().endswith('.xlsx')
     
+    # Ảnh / PDF bắt buộc phải dùng AI để đọc (OCR), còn Excel chọn được cả 2
+    if not is_excel and "Google Translate" in engine_choice:
+        st.info("💡 Lưu ý: File Ảnh/PDF cần AI để quét đọc chữ. Hệ thống sẽ tự dùng Gemini để nhận diện hình ảnh.")
+
     button_label = f"🚀 Dịch ({translation_mode}) & Bảo Toàn Format Excel" if is_excel else f"🚀 AI Quét Ảnh/PDF & Dịch ({translation_mode})"
     
     if st.button(button_label, use_container_width=True):
-        if not api_key:
-            st.error("Vui lòng nhập GEMINI_API_KEY!")
+        if "Gemini AI" in engine_choice and not api_key:
+            st.error("Vui lòng nhập GEMINI_API_KEY khi chọn nguồn dịch Gemini AI!")
         else:
             try:
-                client = genai.Client(api_key=api_key)
-
                 # ----------------------------------------------------
-                # TRƯỜNG HỢP 1: TẢI UP FILE EXCEL (.xlsx)
+                # TRƯỜNG HỢP 1: FILE EXCEL (.xlsx)
                 # ----------------------------------------------------
                 if is_excel:
                     with st.spinner(f"1️⃣ Đang quét các ô cần dịch theo chế độ [{translation_mode}]..."):
@@ -227,26 +256,28 @@ if uploaded_file is not None:
                     if not unique_texts:
                         st.warning("Không tìm thấy nội dung phù hợp với chế độ dịch đã chọn!")
                     else:
-                        with st.spinner(f"2️⃣ AI đang dịch {len(unique_texts)} từ/câu [{translation_mode}]..."):
-                            src_lang = "tiếng Trung" if translation_mode == "Trung ➔ Việt" else "tiếng Việt"
-                            tgt_lang = "tiếng Việt" if translation_mode == "Trung ➔ Việt" else "tiếng Trung"
+                        translation_dict = {}
+                        
+                        # Nhánh A: Dịch bằng Google Translate Miễn Phí (Không Quota)
+                        if "Google Translate" in engine_choice:
+                            with st.spinner(f"2️⃣ Đang dịch miễn phí {len(unique_texts)} từ/câu qua Google Translate..."):
+                                translation_dict = translate_free_batch(unique_texts, translation_mode)
+                        
+                        # Nhánh B: Dịch bằng Gemini AI
+                        else:
+                            with st.spinner(f"2️⃣ AI đang dịch {len(unique_texts)} từ/câu qua Gemini..."):
+                                client = genai.Client(api_key=api_key)
+                                src_lang = "tiếng Trung" if translation_mode == "Trung ➔ Việt" else "tiếng Việt"
+                                tgt_lang = "tiếng Việt" if translation_mode == "Trung ➔ Việt" else "tiếng Trung"
 
-                            prompt = f"""
-                            Bạn là chuyên gia dịch thuật chuyên nghiệp trong lĩnh vực nhân sự, nhà xưởng và bảng chấm công.
-                            Hãy dịch danh sách {src_lang} sau đây sang {tgt_lang}.
-                            
-                            Danh sách nguồn ({src_lang}):
-                            {json.dumps(unique_texts, ensure_ascii=False, indent=2)}
-
-                            Trả về kết quả dưới dạng MỘT JSON OBJECT duy nhất (không dùng markdown code blocks).
-                            Key là văn bản gốc, Value là bản dịch tương ứng.
-                            """
-
-                            # Gọi qua hàm retry an toàn
-                            response = generate_content_with_retry(client, prompt)
-
-                            clean_json = response.text.replace("```json", "").replace("```", "").strip()
-                            translation_dict = json.loads(clean_json)
+                                prompt = f"""
+                                Dịch danh sách {src_lang} sau đây sang {tgt_lang}:
+                                {json.dumps(unique_texts, ensure_ascii=False, indent=2)}
+                                Trả về MỘT JSON OBJECT duy nhất. Key là văn bản gốc, Value là bản dịch.
+                                """
+                                response = generate_content_with_retry(client, prompt)
+                                clean_json = response.text.replace("```json", "").replace("```", "").strip()
+                                translation_dict = json.loads(clean_json)
 
                         with st.spinner("3️⃣ Đang chèn dịch & giữ nguyên 100% định dạng gốc..."):
                             for sheet in wb.worksheets:
@@ -257,7 +288,6 @@ if uploaded_file is not None:
                                             trans = translation_dict.get(orig, "")
                                             if trans:
                                                 cell.value = f"{orig}\n{trans}"
-                                                
                                                 curr_align = cell.alignment
                                                 cell.alignment = Alignment(
                                                     horizontal=curr_align.horizontal or "center",
@@ -269,7 +299,7 @@ if uploaded_file is not None:
                             wb.save(output)
                             output.seek(0)
 
-                            st.success(f"✅ Đã dịch thành công ({translation_mode})! File Excel giữ nguyên 100% màu sắc & font gốc.")
+                            st.success(f"✅ Đã dịch thành công bằng [{engine_choice.split(' ')[0]}]!")
                             st.download_button(
                                 label="⬇️ Tải File Excel Song Ngữ (.xlsx)",
                                 data=output.getvalue(),
@@ -279,57 +309,53 @@ if uploaded_file is not None:
                             )
 
                 # ----------------------------------------------------
-                # TRƯỜNG HỢP 2: TẢI UP FILE ẢNH / PDF
+                # TRƯỜNG HỢP 2: FILE ẢNH / PDF (Cần Gemini AI quét ảnh)
                 # ----------------------------------------------------
                 else:
-                    with st.spinner(f"1️⃣ AI đang quét hình ảnh/PDF và dịch theo hướng [{translation_mode}]..."):
-                        file_bytes = uploaded_file.read()
-                        file_part = types.Part.from_bytes(data=file_bytes, mime_type=uploaded_file.type)
+                    if not api_key:
+                        st.error("Cần có GEMINI_API_KEY để AI đọc dữ liệu từ file Ảnh/PDF!")
+                    else:
+                        client = genai.Client(api_key=api_key)
+                        with st.spinner(f"1️⃣ AI đang quét hình ảnh/PDF và dịch [{translation_mode}]..."):
+                            file_bytes = uploaded_file.read()
+                            file_part = types.Part.from_bytes(data=file_bytes, mime_type=uploaded_file.type)
 
-                        src_lang = "tiếng Trung" if translation_mode == "Trung ➔ Việt" else "tiếng Việt"
-                        tgt_lang = "tiếng Việt" if translation_mode == "Trung ➔ Việt" else "tiếng Trung"
+                            src_lang = "tiếng Trung" if translation_mode == "Trung ➔ Việt" else "tiếng Việt"
+                            tgt_lang = "tiếng Việt" if translation_mode == "Trung ➔ Việt" else "tiếng Trung"
 
-                        prompt = f"""
-                        Hãy phân tích hình ảnh/file bảng chấm công này và trích xuất dữ liệu dưới dạng JSON thuần túy (không dùng markdown backticks).
-                        Dịch các nội dung từ {src_lang} sang {tgt_lang}.
-                        
-                        Cấu trúc JSON yêu cầu:
-                        {{
-                            "title_src": "Tiêu đề ngôn ngữ gốc ({src_lang})",
-                            "title_tgt": "Tiêu đề dịch ({tgt_lang})",
-                            "date_str": "YYYY-MM-DD",
-                            "rows": [
-                                {{
-                                    "stt": 1,
-                                    "dept_src": "Tên bộ phận ngôn ngữ gốc ({src_lang})",
-                                    "dept_tgt": "Dịch tên bộ phận sang ({tgt_lang})",
-                                    "machines": 5,
-                                    "formal": 3,
-                                    "temp": 2,
-                                    "remark": "Ghi chú nếu có"
-                                }}
-                            ]
-                        }}
-                        Lưu ý: Dịch chính xác nghĩa cho từng bộ phận/công việc.
-                        """
+                            prompt = f"""
+                            Phân tích bảng chấm công này và trích xuất dữ liệu dạng JSON thuần túy (không dùng markdown backticks).
+                            Dịch nội dung từ {src_lang} sang {tgt_lang}.
+                            Cấu trúc JSON:
+                            {{
+                                "title_src": "Tiêu đề gốc",
+                                "title_tgt": "Tiêu đề dịch",
+                                "date_str": "YYYY-MM-DD",
+                                "rows": [
+                                    {{
+                                        "stt": 1,
+                                        "dept_src": "Tên bộ phận gốc",
+                                        "dept_tgt": "Tên bộ phận dịch",
+                                        "machines": 5, "formal": 3, "temp": 2, "remark": ""
+                                    }}
+                                ]
+                            }}
+                            """
 
-                        # Gọi qua hàm retry an toàn
-                        response = generate_content_with_retry(client, [file_part, prompt])
+                            response = generate_content_with_retry(client, [file_part, prompt])
+                            clean_json_str = response.text.replace("```json", "").replace("```", "").strip()
+                            parsed_data = json.loads(clean_json_str)
 
-                        clean_json_str = response.text.replace("```json", "").replace("```", "").strip()
-                        parsed_data = json.loads(clean_json_str)
-
-                    with st.spinner("2️⃣ Đang dựng bảng Excel chuẩn đẹp..."):
-                        excel_bytes = build_excel_from_json(parsed_data, translation_mode)
-
-                        st.success(f"✅ Đã quét ảnh và chuyển đổi sang Excel ({translation_mode}) thành công!")
-                        st.download_button(
-                            label="⬇️ Tải Xuất File Excel (.xlsx)",
-                            data=excel_bytes.getvalue(),
-                            file_name=f"Bang_cham_cong_{parsed_data.get('date_str', 'export')}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            use_container_width=True
-                        )
+                        with st.spinner("2️⃣ Đang dựng bảng Excel chuẩn đẹp..."):
+                            excel_bytes = build_excel_from_json(parsed_data, translation_mode)
+                            st.success(f"✅ Đã quét ảnh và xuất Excel thành công!")
+                            st.download_button(
+                                label="⬇️ Tải Xuất File Excel (.xlsx)",
+                                data=excel_bytes.getvalue(),
+                                file_name=f"Bang_cham_cong_{parsed_data.get('date_str', 'export')}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                use_container_width=True
+                            )
 
             except Exception as e:
                 st.error(f"❌ Xảy ra lỗi trong quá trình xử lý: {e}")
