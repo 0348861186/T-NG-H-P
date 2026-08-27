@@ -4,3 +4,4 @@ openpyxl
 Pillow
 google-generativeai
 google-genai
+deep-translator
