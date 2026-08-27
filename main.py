@@ -198,4 +198,90 @@ if uploaded_file is not None:
                                 contents=prompt
                             )
 
-                            clean_json = response.text.replace("```json", "").replace("
+                            clean_json = response.text.replace("```json", "").replace("```", "").strip()
+                            translation_dict = json.loads(clean_json)
+
+                        with st.spinner("3️⃣ Đang chèn dịch tiếng Việt & giữ nguyên 100% định dạng gốc..."):
+                            for sheet in wb.worksheets:
+                                for row in sheet.iter_rows():
+                                    for cell in row:
+                                        if cell.value and isinstance(cell.value, str) and has_chinese(cell.value):
+                                            orig = cell.value.strip()
+                                            trans = translation_dict.get(orig, "")
+                                            if trans:
+                                                # Tiếng Trung ở trên \n Tiếng Việt ở dưới
+                                                cell.value = f"{orig}\n{trans}"
+                                                
+                                                # Giữ nguyên căn chỉnh, bật wrap_text
+                                                curr_align = cell.alignment
+                                                cell.alignment = Alignment(
+                                                    horizontal=curr_align.horizontal or "center",
+                                                    vertical=curr_align.vertical or "center",
+                                                    wrap_text=True
+                                                )
+
+                            output = io.BytesIO()
+                            wb.save(output)
+                            output.seek(0)
+
+                            st.success("✅ Đã dịch thành công! File Excel giữ nguyên 100% màu sắc & font gốc.")
+                            st.download_button(
+                                label="⬇️ Tải File Excel Song Ngữ (.xlsx)",
+                                data=output.getvalue(),
+                                file_name=f"Translated_{uploaded_file.name}",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                use_container_width=True
+                            )
+
+                # ----------------------------------------------------
+                # TRƯỜNG HỢP 2: TẢI UP FILE ẢNH / PDF
+                # ----------------------------------------------------
+                else:
+                    with st.spinner("1️⃣ AI đang quét hình ảnh/PDF và nhận diện bảng chấm công..."):
+                        file_bytes = uploaded_file.read()
+                        file_part = types.Part.from_bytes(data=file_bytes, mime_type=uploaded_file.type)
+
+                        prompt = """
+                        Hãy phân tích hình ảnh/file bảng chấm công này và trích xuất dữ liệu dưới dạng JSON thuần túy (không dùng markdown backticks).
+                        Cấu trúc JSON yêu cầu:
+                        {
+                            "title_cn": "Tiêu đề tiếng Trung",
+                            "title_vi": "Tiêu đề dịch tiếng Việt",
+                            "date_str": "YYYY-MM-DD",
+                            "rows": [
+                                {
+                                    "stt": 1,
+                                    "dept_cn": "Tên bộ phận tiếng Trung",
+                                    "dept_vi": "Dịch tên bộ phận sang tiếng Việt",
+                                    "machines": 5,
+                                    "formal": 3,
+                                    "temp": 2,
+                                    "remark": "Ghi chú nếu có"
+                                }
+                            ]
+                        }
+                        Lưu ý: Dịch chính xác nghĩa tiếng Việt cho từng bộ phận/công việc.
+                        """
+
+                        response = client.models.generate_content(
+                            model="gemini-2.5-flash",
+                            contents=[file_part, prompt]
+                        )
+
+                        clean_json_str = response.text.replace("```json", "").replace("```", "").strip()
+                        parsed_data = json.loads(clean_json_str)
+
+                    with st.spinner("2️⃣ Đang dựng bảng Excel chuẩn đẹp..."):
+                        excel_bytes = build_excel_from_json(parsed_data)
+
+                        st.success("✅ Đã quét ảnh và chuyển đổi sang Excel thành công!")
+                        st.download_button(
+                            label="⬇️ Tải Xuất File Excel (.xlsx)",
+                            data=excel_bytes.getvalue(),
+                            file_name=f"Bang_cham_cong_{parsed_data.get('date_str', 'export')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                        )
+
+            except Exception as e:
+                st.error(f"❌ Xảy ra lỗi trong quá trình xử lý: {e}")
