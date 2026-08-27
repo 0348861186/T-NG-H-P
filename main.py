@@ -2,6 +2,7 @@ import io
 import json
 import re
 import datetime
+import time
 import streamlit as st
 import pandas as pd
 import openpyxl
@@ -20,7 +21,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🤖 Dịch & Xuất Bảng Chấm Công Song Ngữ (Đa Định Dạng & Hai Chiều)")
+st.title("🤖 Dịch & Xuất Bảng Chấm Công Song Ngữ (Tự Động Retry chống lỗi 503)")
 st.caption("Hỗ trợ chọn chế độ Trung -> Việt hoặc Việt -> Trung | Giữ nguyên 100% format Excel gốc hoặc chuyển từ Ảnh/PDF.")
 
 # ============================================================
@@ -32,7 +33,6 @@ with col1:
     api_key = st.text_input("Nhập GEMINI_API_KEY:", type="password")
 
 with col2:
-    # TÙY CHỌN HƯỚNG DỊCH BỔ SUNG
     translation_mode = st.radio(
         "Chế độ dịch:",
         options=["Trung ➔ Việt", "Việt ➔ Trung"],
@@ -51,13 +51,42 @@ def has_chinese(text):
         return False
     return bool(re.search(r'[\u4e00-\u9fff]', text))
 
-# Hàm kiểm tra chuỗi có chứa tiếng Việt không (có dấu hoặc chữ cái Việt)
+# Hàm kiểm tra chuỗi có chứa tiếng Việt không
 def has_vietnamese(text):
     if not isinstance(text, str):
         return False
-    # Tìm các ký tự có dấu đặc trưng tiếng Việt hoặc chữ cái thông thường
     vietnamese_pattern = r'[àáảãạâầấẩẫậăằắẳẵặèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđĐ]'
     return bool(re.search(vietnamese_pattern, text, re.IGNORECASE))
+
+# ============================================================
+# HÀM GỌI GEMINI API CÓ CƠ CHẾ CHỐNG LỖI 503 (RETRY & FALLBACK)
+# ============================================================
+def generate_content_with_retry(client, contents, max_retries=3):
+    """
+    Hàm gọi Gemini API tự động retry khi gặp lỗi 503 và tự động chuyển Model nếu quá tải
+    """
+    models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    
+    for model_name in models_to_try:
+        for attempt in range(max_retries):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=contents
+                )
+                return response
+            except Exception as e:
+                err_msg = str(e)
+                if "503" in err_msg or "UNAVAILABLE" in err_msg or "429" in err_msg:
+                    wait_time = (attempt + 1) * 2  # Chờ 2s, 4s, 6s...
+                    st.warning(f"⚠️ Model {model_name} đang bận (Lỗi 503/429). Đang thử lại lần {attempt + 1}/{max_retries} sau {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    # Nếu là lỗi khác (ví dụ sai API Key) thì throw lỗi ngay
+                    raise e
+        st.info(f"🔄 Chuyển sang model dự phòng tiếp theo...")
+    
+    raise Exception("Tất cả các mô hình Gemini hiện đang bị quá tải. Vui lòng thử lại sau ít phút!")
 
 # Hàm tự tạo file Excel chuẩn đẹp nếu đọc từ Ảnh / PDF
 def build_excel_from_json(data, mode):
@@ -75,11 +104,9 @@ def build_excel_from_json(data, mode):
     dt_str = data.get("date_str", "")
     rows = data.get("rows", [])
 
-    # Cấu hình dòng trên / dòng dưới theo mode
     top_title = t_src if mode == "Trung ➔ Việt" else t_tgt
     bot_title = t_tgt if mode == "Trung ➔ Việt" else t_src
 
-    # Header title
     full_title = f"{dt_str} {top_title}\n{bot_title} ngày {dt_str}".strip()
     ws.merge_cells("A1:F1")
     ws["A1"] = full_title
@@ -87,7 +114,6 @@ def build_excel_from_json(data, mode):
     ws["A1"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     ws.row_dimensions[1].height = 42
 
-    # Headers cột
     if mode == "Trung ➔ Việt":
         headers = [("STT", "STT"), ("部门", "Bộ phận"), ("开几台机", "Số máy mở"), ("正式工", "Chính thức"), ("临时工", "Thời vụ"), ("备注", "Ghi chú")]
     else:
@@ -136,7 +162,6 @@ def build_excel_from_json(data, mode):
         ws.row_dimensions[current_row].height = 32
         current_row += 1
 
-    # Dòng Tổng cộng
     total_row = current_row
     ws.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=2)
     ws.cell(row=total_row, column=1, value="一共\nTổng cộng" if mode == "Trung ➔ Việt" else "Tổng cộng\n一共")
@@ -150,7 +175,6 @@ def build_excel_from_json(data, mode):
         c.border = border
     ws.row_dimensions[total_row].height = 36
 
-    # Widths & Margins
     ws.column_dimensions["A"].width = 8
     ws.column_dimensions["B"].width = 24
     ws.column_dimensions["C"].width = 14
@@ -195,7 +219,6 @@ if uploaded_file is not None:
                                         if translation_mode == "Trung ➔ Việt" and has_chinese(val):
                                             texts_to_translate.add(val)
                                         elif translation_mode == "Việt ➔ Trung" and (has_vietnamese(val) or not has_chinese(val)):
-                                            # Đọc ô có văn bản không phải là chữ Hán thuần túy hoặc có chứa tiếng Việt
                                             if len(val) > 1 and not val.isnumeric():
                                                 texts_to_translate.add(val)
 
@@ -219,10 +242,8 @@ if uploaded_file is not None:
                             Key là văn bản gốc, Value là bản dịch tương ứng.
                             """
 
-                            response = client.models.generate_content(
-                                model="gemini-2.5-flash",
-                                contents=prompt
-                            )
+                            # Gọi qua hàm retry an toàn
+                            response = generate_content_with_retry(client, prompt)
 
                             clean_json = response.text.replace("```json", "").replace("```", "").strip()
                             translation_dict = json.loads(clean_json)
@@ -235,10 +256,8 @@ if uploaded_file is not None:
                                             orig = cell.value.strip()
                                             trans = translation_dict.get(orig, "")
                                             if trans:
-                                                # Dòng gốc ở trên \n Dòng dịch ở dưới
                                                 cell.value = f"{orig}\n{trans}"
                                                 
-                                                # Giữ nguyên căn chỉnh, bật wrap_text
                                                 curr_align = cell.alignment
                                                 cell.alignment = Alignment(
                                                     horizontal=curr_align.horizontal or "center",
@@ -294,10 +313,8 @@ if uploaded_file is not None:
                         Lưu ý: Dịch chính xác nghĩa cho từng bộ phận/công việc.
                         """
 
-                        response = client.models.generate_content(
-                            model="gemini-2.5-flash",
-                            contents=[file_part, prompt]
-                        )
+                        # Gọi qua hàm retry an toàn
+                        response = generate_content_with_retry(client, [file_part, prompt])
 
                         clean_json_str = response.text.replace("```json", "").replace("```", "").strip()
                         parsed_data = json.loads(clean_json_str)
