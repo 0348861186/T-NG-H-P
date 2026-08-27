@@ -5,3 +5,5 @@ Pillow
 google-generativeai
 google-genai
 deep-translator
+opencv-python-headless
+numpy
