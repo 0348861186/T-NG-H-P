@@ -15,13 +15,13 @@ import numpy as np
 # CẤU HÌNH STREAMLIT
 # ============================================================
 st.set_page_config(
-    page_title="Hệ Thống Dịch Bảng Chấm Công (Không dùng AI/Quota)",
+    page_title="Hệ Thống Dịch Bảng Chấm Công (Không tốn Quota)",
     page_icon="🤖",
     layout="wide"
 )
 
-st.title("🤖 Dịch & Xuất Bảng Chấm Công Song Ngữ (Sử dụng Thư viện Dịch / Không tốn Quota)")
-st.caption("Hỗ trợ chọn chế độ Trung ➔ Việt hoặc Việt ➔ Trung | Giữ nguyên 100% format Excel gốc hoặc OCR từ Ảnh/PDF.")
+st.title("🤖 Dịch & Xuất Bảng Chấm Công Song Ngữ (Bảo Toàn Định Dạng Gốc)")
+st.caption("Hỗ trợ chọn chế độ Trung ➔ Việt hoặc Việt ➔ Trung | Giữ nguyên 100% format Excel gốc.")
 
 # ============================================================
 # TẠO 2 READER RIÊNG BIỆT CHO TRUNG VÀ VIỆT (TRÁNH LỖI VALUEERROR)
@@ -68,25 +68,45 @@ def has_vietnamese(text):
     return bool(re.search(vietnamese_pattern, text, re.IGNORECASE))
 
 # ============================================================
-# HÀM DỊCH SỬ DỤNG THƯ VIỆN DEEP-TRANSLATOR
+# HÀM DỊCH SỬ DỤNG THƯ VIỆN DEEP-TRANSLATOR (TỐI ƯU CÂU)
 # ============================================================
 def translate_text_list(text_list, mode):
     """
-    Dịch danh sách các văn bản không cần API Key/Quota
+    Dịch danh sách các văn bản, tách theo từng câu/dòng để đảm bảo không bỏ sót ô nào.
     """
     src_lang = 'zh-CN' if mode == "Trung ➔ Việt" else 'vi'
     tgt_lang = 'vi' if mode == "Trung ➔ Việt" else 'zh-CN'
     
     translator = GoogleTranslator(source=src_lang, target=tgt_lang)
-    
     translation_dict = {}
+    
     for text in text_list:
+        if not text or not str(text).strip():
+            continue
         try:
-            translated = translator.translate(text)
-            translation_dict[text] = translated
-        except Exception as e:
-            translation_dict[text] = text  # Giữ nguyên nếu gặp lỗi kết nối
+            # Nếu chuỗi chứa nhiều dòng (\n), dịch từng dòng nhỏ rồi ghép lại
+            sub_lines = str(text).split('\n')
+            translated_sub_lines = []
+            for line in sub_lines:
+                line_str = line.strip()
+                if not line_str:
+                    translated_sub_lines.append("")
+                    continue
+                
+                # Kiểm tra điều kiện có cần dịch dòng này không
+                should_trans = (mode == "Trung ➔ Việt" and has_chinese(line_str)) or \
+                               (mode == "Việt ➔ Trung" and (has_vietnamese(line_str) or not has_chinese(line_str)))
+                
+                if should_trans and not line_str.replace('.','',1).isdigit():
+                    t_line = translator.translate(line_str)
+                    translated_sub_lines.append(t_line if t_line else line_str)
+                else:
+                    translated_sub_lines.append(line_str)
             
+            translation_dict[text] = "\n".join(translated_sub_lines)
+        except Exception as e:
+            translation_dict[text] = text  # Nếu lỗi kết nối thì giữ nguyên
+
     return translation_dict
 
 # Hàm tự tạo file Excel chuẩn đẹp khi đọc dữ liệu từ Ảnh / PDF
@@ -189,7 +209,7 @@ def build_excel_from_json(data, mode):
     return out
 
 # ============================================================
-# 2. XỬ LÝ DỊCH CHÍNH (PHÂN NHÁNH ẢNH / EXCEL)
+# 2. XỬ LÝ DỊCH CHÍNH (BẢO TOÀN FORMAT EXCEL GỐC)
 # ============================================================
 if uploaded_file is not None:
     is_excel = uploaded_file.name.lower().endswith('.xlsx')
@@ -202,7 +222,7 @@ if uploaded_file is not None:
             # TRƯỜNG HỢP 1: FILE EXCEL (.xlsx)
             # ----------------------------------------------------
             if is_excel:
-                with st.spinner(f"1️⃣ Đang quét các ô cần dịch theo chế độ [{translation_mode}]..."):
+                with st.spinner(f"1️⃣ Đang quét danh sách các ô cần dịch [{translation_mode}]..."):
                     file_bytes = uploaded_file.read()
                     wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
                     
@@ -223,31 +243,48 @@ if uploaded_file is not None:
                 if not unique_texts:
                     st.warning("Không tìm thấy nội dung phù hợp với chế độ dịch đã chọn!")
                 else:
-                    with st.spinner(f"2️⃣ Đang dịch {len(unique_texts)} văn bản bằng Google Translate Library..."):
+                    with st.spinner(f"2️⃣ Đang dịch {len(unique_texts)} văn bản bằng Google Translate..."):
                         translation_dict = translate_text_list(unique_texts, translation_mode)
 
-                    with st.spinner("3️⃣ Đang chèn dịch & giữ nguyên 100% định dạng gốc..."):
+                    with st.spinner("3️⃣ Đang ghi nhận nội dung dịch & giữ nguyên 100% định dạng gốc..."):
                         for sheet in wb.worksheets:
+                            rows_modified = set()
+                            
                             for row in sheet.iter_rows():
                                 for cell in row:
                                     if cell.value and isinstance(cell.value, str):
                                         orig = cell.value.strip()
                                         trans = translation_dict.get(orig, "")
-                                        if trans:
-                                            cell.value = f"{orig}\n{trans}"
+                                        
+                                        # Nếu có kết quả dịch và khác văn bản gốc
+                                        if trans and trans.strip() != orig:
+                                            cell.value = f"{orig}\n{trans.strip()}"
                                             
-                                            curr_align = cell.alignment
-                                            cell.alignment = Alignment(
-                                                horizontal=curr_align.horizontal or "center",
-                                                vertical=curr_align.vertical or "center",
-                                                wrap_text=True
-                                            )
+                                            # Bật wrap_text để hiển thị xuống dòng, GIỮ NGUYÊN căn lề gốc của ô
+                                            if cell.alignment:
+                                                cell.alignment = Alignment(
+                                                    horizontal=cell.alignment.horizontal,
+                                                    vertical=cell.alignment.vertical,
+                                                    wrap_text=True
+                                                )
+                                            else:
+                                                cell.alignment = Alignment(wrap_text=True)
+                                                
+                                            rows_modified.add(cell.row)
+
+                            # Tăng chiều cao của các dòng có chứa ô đã dịch để hiển thị đủ 2 dòng chữ
+                            for r_idx in rows_modified:
+                                current_h = sheet.row_dimensions[r_idx].height
+                                if current_h is not None:
+                                    sheet.row_dimensions[r_idx].height = max(current_h * 1.8, 28)
+                                else:
+                                    sheet.row_dimensions[r_idx].height = 30  # Mặc định chiều cao vừa đẹp cho 2 dòng
 
                         output = io.BytesIO()
                         wb.save(output)
                         output.seek(0)
 
-                        st.success(f"✅ Đã dịch thành công ({translation_mode})! File Excel giữ nguyên 100% định dạng.")
+                        st.success(f"✅ Đã dịch xong! File Excel giữ nguyên 100% định dạng, font chữ và màu sắc gốc.")
                         st.download_button(
                             label="⬇️ Tải File Excel Song Ngữ (.xlsx)",
                             data=output.getvalue(),
@@ -257,39 +294,34 @@ if uploaded_file is not None:
                         )
 
             # ----------------------------------------------------
-            # TRƯỜNG HỢP 2: FILE ẢNH / PDF (SỬ DỤNG EASYOCR + TRANSLATOR)
+            # TRƯỜNG HỢP 2: FILE ẢNH / PDF (EASYOCR)
             # ----------------------------------------------------
             else:
-                with st.spinner("1️⃣ Đang quét chữ bằng EasyOCR (Không cần API/Quota)..."):
+                with st.spinner("1️⃣ Đang quét chữ bằng EasyOCR..."):
                     file_bytes = uploaded_file.read()
                     
                     if uploaded_file.type == "application/pdf":
                         from pdf2image import convert_from_bytes
                         images = convert_from_bytes(file_bytes)
-                        img = images[0] # Lấy trang đầu tiên
+                        img = images[0]
                     else:
                         img = Image.open(io.BytesIO(file_bytes))
                     
-                    # Lựa chọn Reader tương ứng dựa theo chế độ dịch
                     if translation_mode == "Trung ➔ Việt":
                         current_reader = load_ocr_reader_zh()
                     else:
                         current_reader = load_ocr_reader_vi()
 
-                    # Đọc chữ từ ảnh
                     img_np = np.array(img)
                     ocr_results = current_reader.readtext(img_np, detail=0)
-                    
-                    # Bóc tách chữ lấy được
                     extracted_texts = [text.strip() for text in ocr_results if text.strip()]
 
                 if not extracted_texts:
                     st.warning("Không tìm thấy văn bản nào trong ảnh/PDF!")
                 else:
-                    with st.spinner("2️⃣ Đang tự động dịch danh sách văn bản..."):
+                    with st.spinner("2️⃣ Đang dịch danh sách văn bản..."):
                         translation_dict = translate_text_list(extracted_texts, translation_mode)
                         
-                        # Dựng dữ liệu giả lập bảng từ kết quả OCR để tạo file Excel
                         rows_data = []
                         for idx, src_txt in enumerate(extracted_texts, 1):
                             rows_data.append({
@@ -309,12 +341,12 @@ if uploaded_file is not None:
                             "rows": rows_data
                         }
 
-                    with st.spinner("3️⃣ Đang dựng bảng Excel chuẩn đẹp..."):
+                    with st.spinner("3️⃣ Đang dựng bảng Excel..."):
                         excel_bytes = build_excel_from_json(parsed_data, translation_mode)
 
-                        st.success(f"✅ Đã quét chữ bằng OCR và chuyển đổi sang Excel ({translation_mode}) thành công!")
+                        st.success(f"✅ Đã quét chữ và tạo Excel ({translation_mode}) thành công!")
                         st.download_button(
-                            label="⬇️ Tải Xuất File Excel (.xlsx)",
+                            label="⬇️ Tải File Excel (.xlsx)",
                             data=excel_bytes.getvalue(),
                             file_name=f"Bang_cham_cong_OCR_{parsed_data.get('date_str', 'export')}.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
