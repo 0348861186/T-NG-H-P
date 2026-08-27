@@ -1,82 +1,67 @@
 import io
-import json
 import re
-import datetime
-import time
 import streamlit as st
 import pandas as pd
 import openpyxl
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.worksheet.page import PageMargins
-from google import genai
-from google.genai import types
-
-# Thư viện dịch thuật miễn phí không dùng API Key / Quota
 from deep_translator import GoogleTranslator
+import easyocr
+import numpy as np
+from PIL import Image
 
 # ============================================================
 # CẤU HÌNH STREAMLIT
 # ============================================================
 st.set_page_config(
-    page_title="Hệ Thống Dịch Bảng Chấm Công Hai Chiều",
-    page_icon="🤖",
+    page_title="Dịch Bảng Chấm Công Bằng Thư Viện Chuyên Dụng (No-AI)",
+    page_icon="📊",
     layout="wide"
 )
 
-st.title("🤖 Dịch & Xuất Bảng Chấm Công Song Ngữ (Hỗ trợ Dịch Miễn Phí Không Hết Quota)")
-st.caption("Cho phép chọn Dịch bằng AI (Gemini) hoặc Dịch Miễn Phí (Google Translate) khi hết Quota API.")
+st.title("📊 Dịch & Xuất Bảng Chấm Công Song Ngữ (100% Thư Viện - Không Cần API Key)")
+st.caption("Sử dụng EasyOCR quét ảnh + Deep-Translator dịch thuật | Miễn phí hoàn toàn & Không lo hết Quota!")
+
+# Khởi tạo EasyOCR Reader (Caching để không bị load lại nhiều lần)
+@st.cache_resource
+def load_ocr_readers():
+    # Reader đọc tiếng Trung & Tiếng Anh/Số
+    reader_zh = easyocr.Reader(['ch_sim', 'en'], gpu=False)
+    # Reader đọc tiếng Việt & Tiếng Anh/Số
+    reader_vi = easyocr.Reader(['vi', 'en'], gpu=False)
+    return reader_zh, reader_vi
 
 # ============================================================
-# 1. CẤU HÌNH TÙY CHỌN DỊCH VÀ TẢI FILE
+# 1. CẤU HÌNH DASHBOARD
 # ============================================================
-col1, col2, col3, col4 = st.columns([1.2, 1, 1, 1.8])
+col1, col2 = st.columns([1, 2])
 
 with col1:
-    engine_choice = st.selectbox(
-        "Nguồn dịch (Engine):",
-        options=["Google Translate (Miễn phí/Không Quota)", "Gemini AI (Thông minh)"]
-    )
-
-with col2:
     translation_mode = st.radio(
         "Chế độ dịch:",
         options=["Trung ➔ Việt", "Việt ➔ Trung"],
         horizontal=True
     )
 
-with col3:
-    api_key = st.text_input(
-        "GEMINI_API_KEY:", 
-        type="password", 
-        disabled=("Google Translate" in engine_choice),
-        help="Chỉ cần nhập khi chọn nguồn dịch là Gemini AI"
-    )
-
-with col4:
+with col2:
     uploaded_file = st.file_uploader(
-        "Tải lên File Excel hoặc Ảnh/PDF:", 
-        type=["png", "jpg", "jpeg", "pdf", "xlsx"]
+        "Tải lên File Excel (.xlsx) hoặc File Ảnh (.png, .jpg, .jpeg):", 
+        type=["png", "jpg", "jpeg", "xlsx"]
     )
 
-# Hàm kiểm tra chuỗi có chứa chữ Hán / Tiếng Trung không
+# Hàm kiểm tra chữ Trung / Việt
 def has_chinese(text):
-    if not isinstance(text, str):
-        return False
+    if not isinstance(text, str): return False
     return bool(re.search(r'[\u4e00-\u9fff]', text))
 
-# Hàm kiểm tra chuỗi có chứa tiếng Việt không
 def has_vietnamese(text):
-    if not isinstance(text, str):
-        return False
-    vietnamese_pattern = r'[àáảãạâầấẩẫậăằắẳẵặèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđĐ]'
-    return bool(re.search(vietnamese_pattern, text, re.IGNORECASE))
+    if not isinstance(text, str): return False
+    return bool(re.search(r'[àáảãạâầấẩẫậăằắẳẵặèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđĐ]', text, re.IGNORECASE))
 
 # ============================================================
-# 2. HÀM DỊCH BẰNG GOOGLE TRANSLATE (KHÔNG CẦN QUOTA)
+# 2. HÀM DỊCH THUẬT MIỄN PHÍ BẰNG DEEP-TRANSLATOR
 # ============================================================
-def translate_free_batch(texts, mode):
-    """Dịch danh sách chuỗi bằng Google Translate Miễn Phí"""
+def translate_batch(texts, mode):
     src_lang = 'zh-CN' if mode == "Trung ➔ Việt" else 'vi'
     tgt_lang = 'vi' if mode == "Trung ➔ Việt" else 'zh-CN'
     
@@ -84,130 +69,88 @@ def translate_free_batch(texts, mode):
     translation_dict = {}
     
     for text in texts:
+        if not text.strip() or text.isnumeric():
+            continue
         try:
-            # Dịch từng cụm từ
             translated = translator.translate(text)
             translation_dict[text] = translated
         except Exception:
-            translation_dict[text] = text # Nếu lỗi thì giữ nguyên gốc
+            translation_dict[text] = text
             
     return translation_dict
 
 # ============================================================
-# 3. HÀM GỌI GEMINI API (CÓ RETRY CHỐNG 503)
+# 3. HÀM TẠO EXCEL TỪ KẾT QUẢ QUÉT ẢNH (EASYOCR)
 # ============================================================
-def generate_content_with_retry(client, contents, max_retries=3):
-    models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
-    for model_name in models_to_try:
-        for attempt in range(max_retries):
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=contents
-                )
-                return response
-            except Exception as e:
-                err_msg = str(e)
-                if "503" in err_msg or "UNAVAILABLE" in err_msg or "429" in err_msg:
-                    wait_time = (attempt + 1) * 2
-                    time.sleep(wait_time)
-                else:
-                    raise e
-    raise Exception("Tất cả các mô hình Gemini hiện đang bận. Vui lòng thử chọn nguồn 'Google Translate (Miễn phí)'!")
-
-# Hàm tự tạo file Excel chuẩn đẹp từ JSON (Dùng cho Ảnh/PDF)
-def build_excel_from_json(data, mode):
+def build_excel_from_ocr(ocr_results, mode):
     wb = Workbook()
     ws = wb.active
-    ws.title = "Sheet1"
+    ws.title = "Sheet_OCR"
 
     font_name = "Microsoft YaHei"
     orange_fill = PatternFill(fill_type="solid", fgColor="ED7D00")
     thin_side = Side(style="thin", color="000000")
     border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
 
-    t_src = data.get("title_src", "")
-    t_tgt = data.get("title_tgt", "")
-    dt_str = data.get("date_str", "")
-    rows = data.get("rows", [])
+    # Gom nhóm chữ theo hàng (dựa trên tọa độ Y)
+    rows_grouped = []
+    # Sắp xếp các đoạn văn bản từ trên xuống dưới
+    sorted_res = sorted(ocr_results, key=lambda x: x[0][0][1])
+    
+    current_row = []
+    last_y = None
+    
+    for bbox, text, prob in sorted_res:
+        if prob < 0.2 or not text.strip(): # Lọc bỏ rác OCR
+            continue
+        y_center = (bbox[0][1] + bbox[2][1]) / 2
+        
+        if last_y is None or abs(y_center - last_y) < 15: # Cùng 1 hàng
+            current_row.append((bbox[0][0], text)) # Thêm cùng tọa độ X
+            last_y = y_center
+        else:
+            # Sắp xếp từ trái sang phải theo X
+            current_row.sort(key=lambda item: item[0])
+            rows_grouped.append([item[1] for item in current_row])
+            current_row = [(bbox[0][0], text)]
+            last_y = y_center
 
-    top_title = t_src if mode == "Trung ➔ Việt" else t_tgt
-    bot_title = t_tgt if mode == "Trung ➔ Việt" else t_src
+    if current_row:
+        current_row.sort(key=lambda item: item[0])
+        rows_grouped.append([item[1] for item in current_row])
 
-    full_title = f"{dt_str} {top_title}\n{bot_title} ngày {dt_str}".strip()
-    ws.merge_cells("A1:F1")
-    ws["A1"] = full_title
-    ws["A1"].font = Font(name=font_name, size=13, bold=True)
-    ws["A1"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    ws.row_dimensions[1].height = 42
+    # Thu thập tất cả từ cần dịch
+    all_texts = []
+    for row in rows_grouped:
+        for txt in row:
+            if (mode == "Trung ➔ Việt" and has_chinese(txt)) or (mode == "Việt ➔ Trung" and (has_vietnamese(txt) or not has_chinese(txt))):
+                all_texts.append(txt)
 
-    if mode == "Trung ➔ Việt":
-        headers = [("STT", "STT"), ("部门", "Bộ phận"), ("开几台机", "Số máy mở"), ("正式工", "Chính thức"), ("临时工", "Thời vụ"), ("备注", "Ghi chú")]
-    else:
-        headers = [("STT", "STT"), ("Bộ phận", "部门"), ("Số máy mở", "开几台机"), ("Chính thức", "正式工"), ("Thời vụ", "临时工"), ("Ghi chú", "备注")]
+    # Dịch toàn bộ bằng thư viện Deep-Translator
+    trans_dict = translate_batch(list(set(all_texts)), mode)
 
-    for col_idx, (top_h, bot_h) in enumerate(headers, start=1):
-        cell = ws.cell(row=2, column=col_idx)
-        cell.value = f"{top_h}\n{bot_h}" if top_h != bot_h else top_h
-        cell.font = Font(name=font_name, size=10, bold=True)
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        cell.fill = orange_fill
-        cell.border = border
-    ws.row_dimensions[2].height = 38
+    # Ghi dữ liệu ra file Excel
+    for r_idx, row in enumerate(rows_grouped, start=1):
+        for c_idx, txt in enumerate(row, start=1):
+            cell = ws.cell(row=r_idx, column=c_idx)
+            translated_txt = trans_dict.get(txt, "")
+            
+            if translated_txt:
+                cell.value = f"{txt}\n{translated_txt}"
+            else:
+                cell.value = txt
+                
+            cell.font = Font(name=font_name, size=10)
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = border
+            
+        ws.row_dimensions[r_idx].height = 30
 
-    current_row = 3
-    total_workers = 0
-
-    for row in rows:
-        stt = row.get("stt", "")
-        d_src = str(row.get("dept_src", "")) if row.get("dept_src") else ""
-        d_tgt = str(row.get("dept_tgt", "")) if row.get("dept_tgt") else ""
-        mac = row.get("machines", "") or ""
-        fml = row.get("formal", "") or ""
-        tmp = row.get("temp", "") or ""
-        rmk = str(row.get("remark", "")) if row.get("remark") else ""
-
-        try:
-            if fml: total_workers += float(fml)
-            if tmp: total_workers += float(tmp)
-        except:
-            pass
-
-        ws.cell(row=current_row, column=1, value=stt)
-        ws.cell(row=current_row, column=2, value=f"{d_src}\n{d_tgt}".strip())
-        ws.cell(row=current_row, column=3, value=mac)
-        ws.cell(row=current_row, column=4, value=fml)
-        ws.cell(row=current_row, column=5, value=tmp)
-        ws.cell(row=current_row, column=6, value=rmk)
-
-        for col in range(1, 7):
-            c = ws.cell(row=current_row, column=col)
-            c.font = Font(name=font_name, size=10)
-            c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            c.border = border
-
-        ws.row_dimensions[current_row].height = 32
-        current_row += 1
-
-    total_row = current_row
-    ws.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=2)
-    ws.cell(row=total_row, column=1, value="一共\nTổng cộng" if mode == "Trung ➔ Việt" else "Tổng cộng\n一共")
-    ws.merge_cells(start_row=total_row, start_column=3, end_row=total_row, end_column=5)
-    ws.cell(row=total_row, column=3, value=int(total_workers) if isinstance(total_workers, float) and total_workers.is_integer() else total_workers)
-
-    for col in range(1, 7):
-        c = ws.cell(row=total_row, column=col)
-        c.font = Font(name=font_name, size=11, bold=True)
-        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        c.border = border
-    ws.row_dimensions[total_row].height = 36
-
-    ws.column_dimensions["A"].width = 8
-    ws.column_dimensions["B"].width = 24
-    ws.column_dimensions["C"].width = 14
-    ws.column_dimensions["D"].width = 17
-    ws.column_dimensions["E"].width = 17
-    ws.column_dimensions["F"].width = 18
+    # Chỉnh độ rộng cột tự động
+    for col in ws.columns:
+        max_len = max(len(str(cell.value or '')) for cell in col)
+        col_letter = openpyxl.utils.get_column_letter(col[0].column)
+        ws.column_dimensions[col_letter].width = max(max_len + 3, 12)
 
     out = io.BytesIO()
     wb.save(out)
@@ -215,147 +158,95 @@ def build_excel_from_json(data, mode):
     return out
 
 # ============================================================
-# 4. XỬ LÝ DỊCH CHÍNH
+# 4. XỬ LÝ CHÍNH KHI BẤM NÚT DỊCH
 # ============================================================
 if uploaded_file is not None:
     is_excel = uploaded_file.name.lower().endswith('.xlsx')
-    
-    # Ảnh / PDF bắt buộc phải dùng AI để đọc (OCR), còn Excel chọn được cả 2
-    if not is_excel and "Google Translate" in engine_choice:
-        st.info("💡 Lưu ý: File Ảnh/PDF cần AI để quét đọc chữ. Hệ thống sẽ tự dùng Gemini để nhận diện hình ảnh.")
-
-    button_label = f"🚀 Dịch ({translation_mode}) & Bảo Toàn Format Excel" if is_excel else f"🚀 AI Quét Ảnh/PDF & Dịch ({translation_mode})"
+    button_label = f"🚀 Dịch ({translation_mode}) & Bảo Toàn Format Excel" if is_excel else f"🚀 Quét OCR Ảnh & Dịch ({translation_mode})"
     
     if st.button(button_label, use_container_width=True):
-        if "Gemini AI" in engine_choice and not api_key:
-            st.error("Vui lòng nhập GEMINI_API_KEY khi chọn nguồn dịch Gemini AI!")
-        else:
-            try:
-                # ----------------------------------------------------
-                # TRƯỜNG HỢP 1: FILE EXCEL (.xlsx)
-                # ----------------------------------------------------
-                if is_excel:
-                    with st.spinner(f"1️⃣ Đang quét các ô cần dịch theo chế độ [{translation_mode}]..."):
-                        file_bytes = uploaded_file.read()
-                        wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
-                        
-                        texts_to_translate = set()
+        try:
+            # ----------------------------------------------------
+            # TRƯỜNG HỢP 1: DỊCH FILE EXCEL (.xlsx)
+            # ----------------------------------------------------
+            if is_excel:
+                with st.spinner("1️⃣ Đang lọc văn bản cần dịch..."):
+                    file_bytes = uploaded_file.read()
+                    wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
+                    
+                    texts_to_translate = set()
+                    for sheet in wb.worksheets:
+                        for row in sheet.iter_rows():
+                            for cell in row:
+                                if cell.value and isinstance(cell.value, str):
+                                    val = cell.value.strip()
+                                    if translation_mode == "Trung ➔ Việt" and has_chinese(val):
+                                        texts_to_translate.add(val)
+                                    elif translation_mode == "Việt ➔ Trung" and (has_vietnamese(val) or not has_chinese(val)):
+                                        if len(val) > 1 and not val.isnumeric():
+                                            texts_to_translate.add(val)
+
+                    unique_texts = list(texts_to_translate)
+
+                if not unique_texts:
+                    st.warning("Không tìm thấy nội dung phù hợp với chế độ dịch đã chọn!")
+                else:
+                    with st.spinner(f"2️⃣ Đang dịch {len(unique_texts)} từ/câu qua Google Translate (Chạy offline miễn phí)..."):
+                        translation_dict = translate_batch(unique_texts, translation_mode)
+
+                    with st.spinner("3️⃣ Đang chèn dịch & giữ nguyên 100% format Excel gốc..."):
                         for sheet in wb.worksheets:
                             for row in sheet.iter_rows():
                                 for cell in row:
                                     if cell.value and isinstance(cell.value, str):
-                                        val = cell.value.strip()
-                                        if translation_mode == "Trung ➔ Việt" and has_chinese(val):
-                                            texts_to_translate.add(val)
-                                        elif translation_mode == "Việt ➔ Trung" and (has_vietnamese(val) or not has_chinese(val)):
-                                            if len(val) > 1 and not val.isnumeric():
-                                                texts_to_translate.add(val)
+                                        orig = cell.value.strip()
+                                        trans = translation_dict.get(orig, "")
+                                        if trans:
+                                            cell.value = f"{orig}\n{trans}"
+                                            curr_align = cell.alignment
+                                            cell.alignment = Alignment(
+                                                horizontal=curr_align.horizontal or "center",
+                                                vertical=curr_align.vertical or "center",
+                                                wrap_text=True
+                                            )
 
-                        unique_texts = list(texts_to_translate)
+                        output = io.BytesIO()
+                        wb.save(output)
+                        output.seek(0)
 
-                    if not unique_texts:
-                        st.warning("Không tìm thấy nội dung phù hợp với chế độ dịch đã chọn!")
-                    else:
-                        translation_dict = {}
-                        
-                        # Nhánh A: Dịch bằng Google Translate Miễn Phí (Không Quota)
-                        if "Google Translate" in engine_choice:
-                            with st.spinner(f"2️⃣ Đang dịch miễn phí {len(unique_texts)} từ/câu qua Google Translate..."):
-                                translation_dict = translate_free_batch(unique_texts, translation_mode)
-                        
-                        # Nhánh B: Dịch bằng Gemini AI
-                        else:
-                            with st.spinner(f"2️⃣ AI đang dịch {len(unique_texts)} từ/câu qua Gemini..."):
-                                client = genai.Client(api_key=api_key)
-                                src_lang = "tiếng Trung" if translation_mode == "Trung ➔ Việt" else "tiếng Việt"
-                                tgt_lang = "tiếng Việt" if translation_mode == "Trung ➔ Việt" else "tiếng Trung"
+                        st.success("✅ Đã dịch thành công! Giữ nguyên 100% màu sắc & font gốc.")
+                        st.download_button(
+                            label="⬇️ Tải File Excel Song Ngữ (.xlsx)",
+                            data=output.getvalue(),
+                            file_name=f"Translated_{uploaded_file.name}",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                        )
 
-                                prompt = f"""
-                                Dịch danh sách {src_lang} sau đây sang {tgt_lang}:
-                                {json.dumps(unique_texts, ensure_ascii=False, indent=2)}
-                                Trả về MỘT JSON OBJECT duy nhất. Key là văn bản gốc, Value là bản dịch.
-                                """
-                                response = generate_content_with_retry(client, prompt)
-                                clean_json = response.text.replace("```json", "").replace("```", "").strip()
-                                translation_dict = json.loads(clean_json)
+            # ----------------------------------------------------
+            # TRƯỜNG HỢP 2: DỊCH FILE ẢNH (Bằng EasyOCR + Deep-Translator)
+            # ----------------------------------------------------
+            else:
+                with st.spinner("1️⃣ Đang bật mắt thần EasyOCR quét chữ từ hình ảnh..."):
+                    reader_zh, reader_vi = load_ocr_readers()
+                    image = Image.open(uploaded_file)
+                    img_np = np.array(image)
 
-                        with st.spinner("3️⃣ Đang chèn dịch & giữ nguyên 100% định dạng gốc..."):
-                            for sheet in wb.worksheets:
-                                for row in sheet.iter_rows():
-                                    for cell in row:
-                                        if cell.value and isinstance(cell.value, str):
-                                            orig = cell.value.strip()
-                                            trans = translation_dict.get(orig, "")
-                                            if trans:
-                                                cell.value = f"{orig}\n{trans}"
-                                                curr_align = cell.alignment
-                                                cell.alignment = Alignment(
-                                                    horizontal=curr_align.horizontal or "center",
-                                                    vertical=curr_align.vertical or "center",
-                                                    wrap_text=True
-                                                )
+                    # Chọn mô hình OCR tương ứng với hướng dịch
+                    reader = reader_zh if translation_mode == "Trung ➔ Việt" else reader_vi
+                    ocr_results = reader.readtext(img_np)
 
-                            output = io.BytesIO()
-                            wb.save(output)
-                            output.seek(0)
+                with st.spinner("2️⃣ Đang nhóm chữ thành bảng & Dịch sang Excel..."):
+                    excel_bytes = build_excel_from_ocr(ocr_results, translation_mode)
 
-                            st.success(f"✅ Đã dịch thành công bằng [{engine_choice.split(' ')[0]}]!")
-                            st.download_button(
-                                label="⬇️ Tải File Excel Song Ngữ (.xlsx)",
-                                data=output.getvalue(),
-                                file_name=f"Translated_{uploaded_file.name}",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                use_container_width=True
-                            )
+                    st.success("✅ Đã quét ảnh và dựng Excel thành công (100% bằng thư viện)!")
+                    st.download_button(
+                        label="⬇️ Tải Xuất File Excel (.xlsx)",
+                        data=excel_bytes.getvalue(),
+                        file_name="Bang_cham_cong_OCR.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
 
-                # ----------------------------------------------------
-                # TRƯỜNG HỢP 2: FILE ẢNH / PDF (Cần Gemini AI quét ảnh)
-                # ----------------------------------------------------
-                else:
-                    if not api_key:
-                        st.error("Cần có GEMINI_API_KEY để AI đọc dữ liệu từ file Ảnh/PDF!")
-                    else:
-                        client = genai.Client(api_key=api_key)
-                        with st.spinner(f"1️⃣ AI đang quét hình ảnh/PDF và dịch [{translation_mode}]..."):
-                            file_bytes = uploaded_file.read()
-                            file_part = types.Part.from_bytes(data=file_bytes, mime_type=uploaded_file.type)
-
-                            src_lang = "tiếng Trung" if translation_mode == "Trung ➔ Việt" else "tiếng Việt"
-                            tgt_lang = "tiếng Việt" if translation_mode == "Trung ➔ Việt" else "tiếng Trung"
-
-                            prompt = f"""
-                            Phân tích bảng chấm công này và trích xuất dữ liệu dạng JSON thuần túy (không dùng markdown backticks).
-                            Dịch nội dung từ {src_lang} sang {tgt_lang}.
-                            Cấu trúc JSON:
-                            {{
-                                "title_src": "Tiêu đề gốc",
-                                "title_tgt": "Tiêu đề dịch",
-                                "date_str": "YYYY-MM-DD",
-                                "rows": [
-                                    {{
-                                        "stt": 1,
-                                        "dept_src": "Tên bộ phận gốc",
-                                        "dept_tgt": "Tên bộ phận dịch",
-                                        "machines": 5, "formal": 3, "temp": 2, "remark": ""
-                                    }}
-                                ]
-                            }}
-                            """
-
-                            response = generate_content_with_retry(client, [file_part, prompt])
-                            clean_json_str = response.text.replace("```json", "").replace("```", "").strip()
-                            parsed_data = json.loads(clean_json_str)
-
-                        with st.spinner("2️⃣ Đang dựng bảng Excel chuẩn đẹp..."):
-                            excel_bytes = build_excel_from_json(parsed_data, translation_mode)
-                            st.success(f"✅ Đã quét ảnh và xuất Excel thành công!")
-                            st.download_button(
-                                label="⬇️ Tải Xuất File Excel (.xlsx)",
-                                data=excel_bytes.getvalue(),
-                                file_name=f"Bang_cham_cong_{parsed_data.get('date_str', 'export')}.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                use_container_width=True
-                            )
-
-            except Exception as e:
-                st.error(f"❌ Xảy ra lỗi trong quá trình xử lý: {e}")
+        except Exception as e:
+            st.error(f"❌ Xảy ra lỗi trong quá trình xử lý: {e}")
