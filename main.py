@@ -1,7 +1,7 @@
 from pathlib import Path
 import textwrap, zipfile, os
 
-project = Path("/mnt/data/trung_viet_excel_translator")
+project = Path("trung_viet_excel_translator")
 project.mkdir(exist_ok=True)
 
 app_py = r'''import io
