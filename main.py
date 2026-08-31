@@ -10,10 +10,7 @@ st.set_page_config(
     page_title="App Dịch Excel Song Ngữ", page_icon="🌐", layout="wide"
 )
 
-st.title(
-    "🌐 Ứng dụng Dịch File Excel Song Ngữ (Đã sửa lỗi ngôn ngữ & tối ưu cấu"
-    " trúc)"
-)
+st.title("🌐 Ứng dụng Dịch File Excel Song Ngữ (Giữ nguyên 100% định dạng)")
 st.markdown("---")
 
 st.sidebar.header("Cấu hình chiều dịch")
@@ -21,12 +18,12 @@ direction = st.sidebar.selectbox(
     "Chọn chế độ dịch:", ("Trung - Việt", "Việt - Trung")
 )
 
-# Sửa lỗi LanguageNotSupportedException bằng cách dùng mã chuẩn chính xác của Google Translate
+# Sử dụng mã 'zh-CN' chuẩn xác theo danh sách hỗ trợ của deep_translator
 if direction == "Trung - Việt":
-    source_lang, target_lang = "zh", "vi"  # 'zh' là mã chuẩn cho tiếng Trung
+    source_lang, target_lang = "zh-CN", "vi"
     st.sidebar.info("📌 Tiếng Trung (Dòng trên) -> Tiếng Việt (Dòng dưới).")
 else:
-    source_lang, target_lang = "vi", "zh"
+    source_lang, target_lang = "vi", "zh-CN"
     st.sidebar.info("📌 Tiếng Việt (Dòng trên) -> Tiếng Trung (Dòng dưới).")
 
 # Khởi tạo translator an toàn
