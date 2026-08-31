@@ -448,10 +448,8 @@ tesseract-ocr-vie
 tesseract-ocr-eng
 '''
 
-readme = """# Trung ↔ Việt Excel & Image Translator
-
+readme = """# Trung ↔ Việt Excel & Image Translator 
 Ứng dụng Streamlit dịch hai chiều:
-
 - Trung → Việt
 - Việt → Trung
 - Excel .xlsx / .xlsm → Excel đã dịch
@@ -468,7 +466,7 @@ Excel đầu vào được giữ lại các thành phần định dạng chính:
 - Chiều cao dòng
 - Freeze panes
 
-## Chạy local
+## Chạy local 
 
 ```bash
 pip install -r requirements.txt
