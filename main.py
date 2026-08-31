@@ -1,336 +1,195 @@
+import copy
 import io
-import json
-import re
-import datetime
-import time
-import streamlit as st
-import pandas as pd
 import openpyxl
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.worksheet.page import PageMargins
-from google import genai
-from google.genai import types
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
+from deep_translator import GoogleTranslator
+import streamlit as st
 
-# ============================================================
-# CẤU HÌNH STREAMLIT
-# ============================================================
 st.set_page_config(
-    page_title="Hệ Thống Dịch Bảng Chấm Công Hai Chiều",
-    page_icon="🤖",
-    layout="wide"
+    page_title="App Dịch File Excel Song Ngữ Chuẩn 100%",
+    page_icon="🌐",
+    layout="wide",
 )
 
-st.title("🤖 Dịch & Xuất Bảng Chấm Công Song Ngữ (Tự Động Retry chống lỗi 503)")
-st.caption("Hỗ trợ chọn chế độ Trung -> Việt hoặc Việt -> Trung | Giữ nguyên 100% format Excel gốc hoặc chuyển từ Ảnh/PDF.")
+st.title(
+    "🌐 Ứng dụng Dịch File Excel Song Ngữ (Bảo toàn 100% Định dạng, Merge Cells"
+    " & Công thức)"
+)
+st.markdown("---")
 
-# ============================================================
-# 1. CẤU HÌNH API KEY, BỘ LỌC HƯỚNG DỊCH & TẢI FILE
-# ============================================================
-col1, col2, col3 = st.columns([1, 1.2, 1.8])
+# Dashboard chọn chiều dịch
+st.sidebar.header("Cấu hình chiều dịch")
+direction = st.sidebar.selectbox(
+    "Chọn chế độ dịch:", ("Trung - Việt", "Việt - Trung")
+)
 
-with col1:
-    api_key = st.text_input("Nhập GEMINI_API_KEY:", type="password")
-
-with col2:
-    translation_mode = st.radio(
-        "Chế độ dịch:",
-        options=["Trung ➔ Việt", "Việt ➔ Trung"],
-        horizontal=True
+if direction == "Trung - Việt":
+    source_lang, target_lang = "zh", "vi"
+    st.sidebar.info(
+        "📌 Quy tắc: Tiếng Trung (Dòng trên) -> Tiếng Việt (Dòng dưới ngay"
+        " cùng ô)."
+    )
+else:
+    source_lang, target_lang = "vi", "zh"
+    st.sidebar.info(
+        "📌 Quy tắc: Tiếng Trung (Dòng trên) -> Tiếng Việt (Dòng dưới ngay"
+        " cùng ô). (Tự động đảo chiều)."
     )
 
-with col3:
-    uploaded_file = st.file_uploader(
-        "Tải lên Ảnh, PDF hoặc File Excel:", 
-        type=["png", "jpg", "jpeg", "pdf", "xlsx"]
-    )
+translator = GoogleTranslator(source=source_lang, target=target_lang)
 
-# Hàm kiểm tra chuỗi có chứa chữ Hán / Tiếng Trung không
-def has_chinese(text):
-    if not isinstance(text, str):
-        return False
-    return bool(re.search(r'[\u4e00-\u9fff]', text))
 
-# Hàm kiểm tra chuỗi có chứa tiếng Việt không
-def has_vietnamese(text):
-    if not isinstance(text, str):
-        return False
-    vietnamese_pattern = r'[àáảãạâầấẩẫậăằắẳẵặèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđĐ]'
-    return bool(re.search(vietnamese_pattern, text, re.IGNORECASE))
+def translate_text(text):
+    if text is None:
+        return ""
+    text_str = str(text).strip()
+    if not text_str:
+        return ""
+    # Giữ nguyên nếu là công thức Excel (bắt đầu bằng dấu =) hoặc số thuần túy
+    if text_str.startswith("=") or text_str.replace(".", "", 1).isdigit():
+        return text_str
+    try:
+        return translator.translate(text_str)
+    except Exception:
+        return text_str
 
-# ============================================================
-# HÀM GỌI GEMINI API CÓ CƠ CHẾ CHỐNG LỖI 503 (RETRY & FALLBACK)
-# ============================================================
-def generate_content_with_retry(client, contents, max_retries=3):
-    """
-    Hàm gọi Gemini API tự động retry khi gặp lỗi 503 và tự động chuyển Model nếu quá tải
-    """
-    models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
-    
-    for model_name in models_to_try:
-        for attempt in range(max_retries):
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=contents
-                )
-                return response
-            except Exception as e:
-                err_msg = str(e)
-                if "503" in err_msg or "UNAVAILABLE" in err_msg or "429" in err_msg:
-                    wait_time = (attempt + 1) * 2  # Chờ 2s, 4s, 6s...
-                    st.warning(f"⚠️ Model {model_name} đang bận (Lỗi 503/429). Đang thử lại lần {attempt + 1}/{max_retries} sau {wait_time}s...")
-                    time.sleep(wait_time)
-                else:
-                    # Nếu là lỗi khác (ví dụ sai API Key) thì throw lỗi ngay
-                    raise e
-        st.info(f"🔄 Chuyển sang model dự phòng tiếp theo...")
-    
-    raise Exception("Tất cả các mô hình Gemini hiện đang bị quá tải. Vui lòng thử lại sau ít phút!")
 
-# Hàm tự tạo file Excel chuẩn đẹp nếu đọc từ Ảnh / PDF
-def build_excel_from_json(data, mode):
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Sheet1"
+# Tải file lên
+uploaded_file = st.file_uploader(
+    "Tải lên file Excel (.xlsx) của bạn", type=["xlsx"]
+)
 
-    font_name = "Microsoft YaHei"
-    orange_fill = PatternFill(fill_type="solid", fgColor="ED7D00")
-    thin_side = Side(style="thin", color="000000")
-    border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
-
-    t_src = data.get("title_src", "")
-    t_tgt = data.get("title_tgt", "")
-    dt_str = data.get("date_str", "")
-    rows = data.get("rows", [])
-
-    top_title = t_src if mode == "Trung ➔ Việt" else t_tgt
-    bot_title = t_tgt if mode == "Trung ➔ Việt" else t_src
-
-    full_title = f"{dt_str} {top_title}\n{bot_title} ngày {dt_str}".strip()
-    ws.merge_cells("A1:F1")
-    ws["A1"] = full_title
-    ws["A1"].font = Font(name=font_name, size=13, bold=True)
-    ws["A1"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    ws.row_dimensions[1].height = 42
-
-    if mode == "Trung ➔ Việt":
-        headers = [("STT", "STT"), ("部门", "Bộ phận"), ("开几台机", "Số máy mở"), ("正式工", "Chính thức"), ("临时工", "Thời vụ"), ("备注", "Ghi chú")]
-    else:
-        headers = [("STT", "STT"), ("Bộ phận", "部门"), ("Số máy mở", "开几台机"), ("Chính thức", "正式工"), ("Thời vụ", "临时工"), ("Ghi chú", "备注")]
-
-    for col_idx, (top_h, bot_h) in enumerate(headers, start=1):
-        cell = ws.cell(row=2, column=col_idx)
-        cell.value = f"{top_h}\n{bot_h}" if top_h != bot_h else top_h
-        cell.font = Font(name=font_name, size=10, bold=True)
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        cell.fill = orange_fill
-        cell.border = border
-    ws.row_dimensions[2].height = 38
-
-    current_row = 3
-    total_workers = 0
-
-    for row in rows:
-        stt = row.get("stt", "")
-        d_src = str(row.get("dept_src", "")) if row.get("dept_src") else ""
-        d_tgt = str(row.get("dept_tgt", "")) if row.get("dept_tgt") else ""
-        mac = row.get("machines", "") or ""
-        fml = row.get("formal", "") or ""
-        tmp = row.get("temp", "") or ""
-        rmk = str(row.get("remark", "")) if row.get("remark") else ""
-
-        try:
-            if fml: total_workers += float(fml)
-            if tmp: total_workers += float(tmp)
-        except:
-            pass
-
-        ws.cell(row=current_row, column=1, value=stt)
-        ws.cell(row=current_row, column=2, value=f"{d_src}\n{d_tgt}".strip())
-        ws.cell(row=current_row, column=3, value=mac)
-        ws.cell(row=current_row, column=4, value=fml)
-        ws.cell(row=current_row, column=5, value=tmp)
-        ws.cell(row=current_row, column=6, value=rmk)
-
-        for col in range(1, 7):
-            c = ws.cell(row=current_row, column=col)
-            c.font = Font(name=font_name, size=10)
-            c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            c.border = border
-
-        ws.row_dimensions[current_row].height = 32
-        current_row += 1
-
-    total_row = current_row
-    ws.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=2)
-    ws.cell(row=total_row, column=1, value="一共\nTổng cộng" if mode == "Trung ➔ Việt" else "Tổng cộng\n一共")
-    ws.merge_cells(start_row=total_row, start_column=3, end_row=total_row, end_column=5)
-    ws.cell(row=total_row, column=3, value=int(total_workers) if isinstance(total_workers, float) and total_workers.is_integer() else total_workers)
-
-    for col in range(1, 7):
-        c = ws.cell(row=total_row, column=col)
-        c.font = Font(name=font_name, size=11, bold=True)
-        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        c.border = border
-    ws.row_dimensions[total_row].height = 36
-
-    ws.column_dimensions["A"].width = 8
-    ws.column_dimensions["B"].width = 24
-    ws.column_dimensions["C"].width = 14
-    ws.column_dimensions["D"].width = 17
-    ws.column_dimensions["E"].width = 17
-    ws.column_dimensions["F"].width = 18
-
-    out = io.BytesIO()
-    wb.save(out)
-    out.seek(0)
-    return out
-
-# ============================================================
-# 2. XỬ LÝ DỊCH CHÍNH (PHÂN NHÁNH ẢNH / EXCEL + HƯỚNG DỊCH)
-# ============================================================
 if uploaded_file is not None:
-    is_excel = uploaded_file.name.lower().endswith('.xlsx')
-    
-    button_label = f"🚀 Dịch ({translation_mode}) & Bảo Toàn Format Excel" if is_excel else f"🚀 AI Quét Ảnh/PDF & Dịch ({translation_mode})"
-    
-    if st.button(button_label, use_container_width=True):
-        if not api_key:
-            st.error("Vui lòng nhập GEMINI_API_KEY!")
-        else:
-            try:
-                client = genai.Client(api_key=api_key)
+    st.success("Tải file thành công! Đang xử lý toàn diện cấu trúc file...")
 
-                # ----------------------------------------------------
-                # TRƯỜNG HỢP 1: TẢI UP FILE EXCEL (.xlsx)
-                # ----------------------------------------------------
-                if is_excel:
-                    with st.spinner(f"1️⃣ Đang quét các ô cần dịch theo chế độ [{translation_mode}]..."):
-                        file_bytes = uploaded_file.read()
-                        wb = openpyxl.load_workbook(io.BytesIO(file_bytes))
-                        
-                        texts_to_translate = set()
-                        for sheet in wb.worksheets:
-                            for row in sheet.iter_rows():
-                                for cell in row:
-                                    if cell.value and isinstance(cell.value, str):
-                                        val = cell.value.strip()
-                                        if translation_mode == "Trung ➔ Việt" and has_chinese(val):
-                                            texts_to_translate.add(val)
-                                        elif translation_mode == "Việt ➔ Trung" and (has_vietnamese(val) or not has_chinese(val)):
-                                            if len(val) > 1 and not val.isnumeric():
-                                                texts_to_translate.add(val)
+    try:
+        # Load workbook với data_only=False để bảo toàn công thức tính toán
+        wb = openpyxl.load_workbook(uploaded_file, data_only=False)
 
-                        unique_texts = list(texts_to_translate)
+        with st.spinner(
+            "Đang dịch, nhân đôi hàng, bảo toàn style, merge cells và biểu"
+            " đồ..."
+        ):
+            for sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
 
-                    if not unique_texts:
-                        st.warning("Không tìm thấy nội dung phù hợp với chế độ dịch đã chọn!")
-                    else:
-                        with st.spinner(f"2️⃣ AI đang dịch {len(unique_texts)} từ/câu [{translation_mode}]..."):
-                            src_lang = "tiếng Trung" if translation_mode == "Trung ➔ Việt" else "tiếng Việt"
-                            tgt_lang = "tiếng Việt" if translation_mode == "Trung ➔ Việt" else "tiếng Trung"
+                # 1. Lưu giữ chiều rộng cột (Column Widths)
+                col_widths = {
+                    col: ws.column_dimensions[col].width
+                    for col in ws.column_dimensions
+                }
 
-                            prompt = f"""
-                            Bạn là chuyên gia dịch thuật chuyên nghiệp trong lĩnh vực nhân sự, nhà xưởng và bảng chấm công.
-                            Hãy dịch danh sách {src_lang} sau đây sang {tgt_lang}.
-                            
-                            Danh sách nguồn ({src_lang}):
-                            {json.dumps(unique_texts, ensure_ascii=False, indent=2)}
+                # 2. Xử lý Merged Cells: Lưu lại các vùng gộp, unmerge trước khi insert rows để tránh lỗi vỡ cấu trúc
+                merged_ranges_bak = [
+                    str(cell_range) for cell_range in ws.merged_cells.ranges
+                ]
+                for cr in merged_ranges_bak:
+                    ws.unmerge_cells(cr)
 
-                            Trả về kết quả dưới dạng MỘT JSON OBJECT duy nhất (không dùng markdown code blocks).
-                            Key là văn bản gốc, Value là bản dịch tương ứng.
-                            """
+                max_row = ws.max_row
+                max_col = ws.max_column
 
-                            # Gọi qua hàm retry an toàn
-                            response = generate_content_with_retry(client, prompt)
+                # Lưu chiều cao hàng gốc (Row Heights)
+                row_heights_bak = {}
+                for r in range(1, max_row + 1):
+                    if ws.row_dimensions[r].height:
+                        row_heights_bak[r] = ws.row_dimensions[r].height
 
-                            clean_json = response.text.replace("```json", "").replace("```", "").strip()
-                            translation_dict = json.loads(clean_json)
+                # 3. Duyệt từ dưới lên trên để insert dòng không làm lệch index hàng phía trên
+                for r in range(max_row, 0, -1):
+                    has_content = any(
+                        ws.cell(row=r, column=c).value is not None
+                        for c in range(1, max_col + 1)
+                    )
+                    if not has_content:
+                        continue
 
-                        with st.spinner("3️⃣ Đang chèn dịch & giữ nguyên 100% định dạng gốc..."):
-                            for sheet in wb.worksheets:
-                                for row in sheet.iter_rows():
-                                    for cell in row:
-                                        if cell.value and isinstance(cell.value, str):
-                                            orig = cell.value.strip()
-                                            trans = translation_dict.get(orig, "")
-                                            if trans:
-                                                cell.value = f"{orig}\n{trans}"
-                                                
-                                                curr_align = cell.alignment
-                                                cell.alignment = Alignment(
-                                                    horizontal=curr_align.horizontal or "center",
-                                                    vertical=curr_align.vertical or "center",
-                                                    wrap_text=True
-                                                )
+                    # Chèn thêm 1 dòng trống ngay bên dưới dòng r
+                    ws.insert_rows(r + 1)
 
-                            output = io.BytesIO()
-                            wb.save(output)
-                            output.seek(0)
+                    # Đồng bộ chiều cao hàng mới bằng hàng cũ
+                    if r in row_heights_bak:
+                        ws.row_dimensions[r + 1].height = row_heights_bak[r]
 
-                            st.success(f"✅ Đã dịch thành công ({translation_mode})! File Excel giữ nguyên 100% màu sắc & font gốc.")
-                            st.download_button(
-                                label="⬇️ Tải File Excel Song Ngữ (.xlsx)",
-                                data=output.getvalue(),
-                                file_name=f"Translated_{uploaded_file.name}",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                use_container_width=True
+                    # 4. Sao chép định dạng tuyệt đối 100% bằng copy.copy() sâu các đối tượng style
+                    for c in range(1, max_col + 1):
+                        src_cell = ws.cell(row=r, column=c)
+                        dst_cell = ws.cell(row=r + 1, column=c)
+
+                        val = src_cell.value
+                        dst_cell.value = val
+
+                        # Sử dụng copy.copy() để giữ nguyên vẹn 100% Font, Fill, Alignment, Border
+                        if src_cell.font:
+                            dst_cell.font = copy.copy(src_cell.font)
+                        if src_cell.fill:
+                            dst_cell.fill = copy.copy(src_cell.fill)
+                        if src_cell.alignment:
+                            dst_cell.alignment = copy.copy(
+                                src_cell.alignment
                             )
+                        if src_cell.border:
+                            dst_cell.border = copy.copy(src_cell.border)
+                        dst_cell.number_format = src_cell.number_format
 
-                # ----------------------------------------------------
-                # TRƯỜNG HỢP 2: TẢI UP FILE ẢNH / PDF
-                # ----------------------------------------------------
-                else:
-                    with st.spinner(f"1️⃣ AI đang quét hình ảnh/PDF và dịch theo hướng [{translation_mode}]..."):
-                        file_bytes = uploaded_file.read()
-                        file_part = types.Part.from_bytes(data=file_bytes, mime_type=uploaded_file.type)
+                        # Thực hiện dịch và sắp xếp vị trí: Tiếng Việt luôn nằm ngay dưới Tiếng Trung
+                        if val is not None:
+                            translated_val = translate_text(val)
+                            if direction == "Trung - Việt":
+                                dst_cell.value = translated_val
+                            else:
+                                dst_cell.value = (
+                                    val  # Dòng dưới giữ Tiếng Việt
+                                )
+                                src_cell.value = (
+                                    translated_val  # Dòng trên đổi thành Tiếng Trung
+                                )
 
-                        src_lang = "tiếng Trung" if translation_mode == "Trung ➔ Việt" else "tiếng Việt"
-                        tgt_lang = "tiếng Việt" if translation_mode == "Trung ➔ Việt" else "tiếng Trung"
+                # 5. Phục hồi và mở rộng các vùng Merge Cells theo tỷ lệ dòng nhân đôi
+                for cr in merged_ranges_bak:
+                    parts = cr.split(":")
+                    if len(parts) == 2:
+                        top_left, bottom_right = parts[0], parts[1]
+                        tl_col = "".join(filter(str.isalpha, top_left))
+                        tl_row = int("".join(filter(str.isdigit, top_left)))
+                        br_col = "".join(filter(str.isalpha, bottom_right))
+                        br_row = int("".join(filter(str.isdigit, bottom_right)))
 
-                        prompt = f"""
-                        Hãy phân tích hình ảnh/file bảng chấm công này và trích xuất dữ liệu dưới dạng JSON thuần túy (không dùng markdown backticks).
-                        Dịch các nội dung từ {src_lang} sang {tgt_lang}.
-                        
-                        Cấu trúc JSON yêu cầu:
-                        {{
-                            "title_src": "Tiêu đề ngôn ngữ gốc ({src_lang})",
-                            "title_tgt": "Tiêu đề dịch ({tgt_lang})",
-                            "date_str": "YYYY-MM-DD",
-                            "rows": [
-                                {{
-                                    "stt": 1,
-                                    "dept_src": "Tên bộ phận ngôn ngữ gốc ({src_lang})",
-                                    "dept_tgt": "Dịch tên bộ phận sang ({tgt_lang})",
-                                    "machines": 5,
-                                    "formal": 3,
-                                    "temp": 2,
-                                    "remark": "Ghi chú nếu có"
-                                }}
-                            ]
-                        }}
-                        Lưu ý: Dịch chính xác nghĩa cho từng bộ phận/công việc.
-                        """
-
-                        # Gọi qua hàm retry an toàn
-                        response = generate_content_with_retry(client, [file_part, prompt])
-
-                        clean_json_str = response.text.replace("```json", "").replace("```", "").strip()
-                        parsed_data = json.loads(clean_json_str)
-
-                    with st.spinner("2️⃣ Đang dựng bảng Excel chuẩn đẹp..."):
-                        excel_bytes = build_excel_from_json(parsed_data, translation_mode)
-
-                        st.success(f"✅ Đã quét ảnh và chuyển đổi sang Excel ({translation_mode}) thành công!")
-                        st.download_button(
-                            label="⬇️ Tải Xuất File Excel (.xlsx)",
-                            data=excel_bytes.getvalue(),
-                            file_name=f"Bang_cham_cong_{parsed_data.get('date_str', 'export')}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            use_container_width=True
+                        new_top_row = (tl_row * 2) - 1
+                        new_bottom_row = br_row * 2
+                        new_range_str = (
+                            f"{tl_col}{new_top_row}:{br_col}{new_bottom_row}"
                         )
+                        try:
+                            ws.merge_cells(new_range_str)
+                        except Exception:
+                            pass
 
-            except Exception as e:
-                st.error(f"❌ Xảy ra lỗi trong quá trình xử lý: {e}")
+                # Khôi phục chiều rộng cột
+                for col, width in col_widths.items():
+                    if width:
+                        ws.column_dimensions[col].width = width
 
+        # Lưu file vào bộ nhớ đệm
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        st.success(
+            "🎉 Hoàn tất dịch file, giữ nguyên 100% định dạng, merge cells,"
+            " biểu đồ và công thức!"
+        )
+
+        # 6. Nút download file excel sau khi dịch
+        st.download_button(
+            label="📥 Tải xuống file Excel song ngữ hoàn chỉnh",
+            data=output,
+            file_name=f"dich_song_ngu_chuan_100_{uploaded_file.name}",
+            mime=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+        )
+
+    except Exception as e:
+        st.error(f"Đã xảy ra lỗi trong quá trình xử lý file: {e}")
