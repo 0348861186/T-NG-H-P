@@ -954,8 +954,9 @@ if uploaded_file is not None:
 **Cách 2 – Cấu hình trên Streamlit Cloud (Secrets):**
 ```toml
 GEMINI_API_KEY = "AIza..."
+"""
 )
-        st.stop()
+st.stop()
     # ========================================================
     # EXCEL
     # ========================================================
