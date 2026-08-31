@@ -259,4 +259,698 @@ def extract_json(text):
         pass
 
     text = re.sub(r"^```json\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s*
+    text = re.sub(r"\s*```$", "", text, flags=re.IGNORECASE)
+
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+
+    first_obj = text.find("{")
+    last_obj = text.rfind("}")
+
+    if first_obj >= 0 and last_obj > first_obj:
+        candidate = text[first_obj:last_obj + 1]
+        try:
+            return json.loads(candidate)
+        except Exception:
+            pass
+
+    first_list = text.find("[")
+    last_list = text.rfind("]")
+
+    if first_list >= 0 and last_list > first_list:
+        candidate = text[first_list:last_list + 1]
+        try:
+            return json.loads(candidate)
+        except Exception:
+            pass
+
+    raise ValueError("Không thể đọc JSON từ phản hồi Gemini.")
+
+
+# ============================================================
+# GEMINI TRANSLATION
+# ============================================================
+
+def gemini_generate(prompt, model, image=None, mime_type=None):
+    """
+    Gọi Gemini với retry.
+    """
+    if client is None:
+        raise RuntimeError("Chưa cấu hình GEMINI_API_KEY.")
+
+    last_error = None
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            if image is None:
+                response = client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=0,
+                        response_mime_type="application/json",
+                    ),
+                )
+            else:
+                image_part = types.Part.from_bytes(
+                    data=image,
+                    mime_type=mime_type,
+                )
+                response = client.models.generate_content(
+                    model=model,
+                    contents=[prompt, image_part],
+                    config=types.GenerateContentConfig(
+                        temperature=0,
+                        response_mime_type="application/json",
+                    ),
+                )
+
+            if not response or not response.text:
+                raise RuntimeError("Gemini trả về phản hồi rỗng.")
+
+            return response.text, model
+
+        except Exception as exc:
+            last_error = exc
+            error_text = str(exc).lower()
+
+            temporary_error = any(
+                keyword in error_text
+                for keyword in [
+                    "503",
+                    "unavailable",
+                    "429",
+                    "resource exhausted",
+                    "timeout",
+                    "deadline",
+                    "internal",
+                    "overloaded",
+                ]
+            )
+
+            if attempt < MAX_RETRIES and temporary_error:
+                time.sleep(2 * attempt)
+                continue
+
+            raise last_error
+
+
+def translate_batch_with_gemini(items):
+    """
+    Dịch danh sách các đoạn text theo batch qua Gemini.
+    """
+    if not items:
+        return {}
+
+    source_name = "Chinese" if direction == "Trung → Việt" else "Vietnamese"
+    target_name = "Vietnamese" if direction == "Trung → Việt" else "Chinese"
+
+    payload = json.dumps(items, ensure_ascii=False)
+
+    prompt = f"""
+You are a professional Chinese-Vietnamese translator.
+ 
+Translation direction:
+{source_name} -> {target_name}
+ 
+Translate ONLY the text values.
+ 
+Important rules:
+1. Preserve product names, technical terminology and manufacturing terminology accurately.
+2. Do not add explanations.
+3. Do not summarize.
+4. Do not change numbers.
+5. Do not change units.
+6. Do not change model numbers.
+7. Keep the same item IDs.
+8. Return valid JSON only.
+9. Every input ID must have exactly one translated value.
+ 
+Input JSON:
+{payload}
+ 
+Output JSON format:
+{{
+ "translations": [
+    {{
+      "id": 1,
+     "translation": "..."
+    }}
+  ]
+}}
+"""
+
+    # PRIMARY MODEL
+    try:
+        raw, used_model = gemini_generate(
+            prompt=prompt,
+            model=PRIMARY_MODEL,
+        )
+
+        data = extract_json(raw)
+        translations = data.get("translations", [])
+
+        result = {}
+        for item in translations:
+            item_id = item.get("id")
+            translated = item.get("translation")
+
+            if item_id is not None:
+                result[int(item_id)] = str(translated) if translated is not None else ""
+
+        if len(result) < len(items):
+            raise ValueError("Gemini trả thiếu bản dịch.")
+
+        return result, used_model
+
+    except Exception as primary_error:
+        # FALLBACK MODEL
+        try:
+            raw, used_model = gemini_generate(
+                prompt=prompt,
+                model=FALLBACK_MODEL,
+            )
+
+            data = extract_json(raw)
+            translations = data.get("translations", [])
+
+            result = {}
+            for item in translations:
+                item_id = item.get("id")
+                translated = item.get("translation")
+
+                if item_id is not None:
+                    result[int(item_id)] = str(translated) if translated is not None else ""
+
+            if len(result) < len(items):
+                raise ValueError("Fallback Gemini trả thiếu bản dịch.")
+
+            return result, used_model
+
+        except Exception as fallback_error:
+            raise RuntimeError(
+                "Gemini chính và Gemini fallback đều thất bại.\n\n"
+                f"Primary: {primary_error}\n"
+                f"Fallback: {fallback_error}"
+            )
+
+
+# ============================================================
+# EXCEL STYLE HELPERS
+# ============================================================
+
+def copy_cell_style(src, dst):
+    if src.has_style:
+        dst._style = copy.copy(src._style)
+
+    if src.number_format:
+        dst.number_format = src.number_format
+
+    if src.protection:
+        dst.protection = copy.copy(src.protection)
+
+    if src.alignment:
+        dst.alignment = copy.copy(src.alignment)
+
+    if src.font:
+        dst.font = copy.copy(src.font)
+
+    if src.fill:
+        dst.fill = copy.copy(src.fill)
+
+    if src.border:
+        dst.border = copy.copy(src.border)
+
+
+def copy_row_dimension(ws, source_row, target_row):
+    src = ws.row_dimensions[source_row]
+    dst = ws.row_dimensions[target_row]
+
+    if src.height is not None:
+        dst.height = src.height
+
+    dst.hidden = src.hidden
+    dst.outlineLevel = src.outlineLevel
+    dst.collapsed = src.collapsed
+
+
+# ============================================================
+# EXCEL PROCESSING
+# ============================================================
+
+def collect_excel_translation_items(wb):
+    items = []
+    counter = 1
+
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                if isinstance(cell, MergedCell):
+                    continue
+
+                value = cell.value
+
+                if not should_translate_cell(value):
+                    continue
+
+                items.append(
+                    {
+                        "id": counter,
+                        "sheet": ws.title,
+                        "row": cell.row,
+                        "column": cell.column,
+                        "text": str(value),
+                    }
+                )
+
+                counter += 1
+
+    return items
+
+
+def translate_excel_texts(wb, progress_callback=None):
+    all_items = collect_excel_translation_items(wb)
+
+    if not all_items:
+        return {}, PRIMARY_MODEL, 0
+
+    translations = {}
+    total = len(all_items)
+    used_models = []
+
+    batches = [
+        all_items[i:i + MAX_TEXT_BATCH]
+        for i in range(0, total, MAX_TEXT_BATCH)
+    ]
+
+    for batch_index, batch in enumerate(batches):
+        batch_input = [
+            {
+                "id": item["id"],
+                "text": item["text"],
+            }
+            for item in batch
+        ]
+
+        batch_result, used_model = translate_batch_with_gemini(batch_input)
+
+        translations.update(batch_result)
+        used_models.append(used_model)
+
+        if progress_callback:
+            progress_callback(
+                min(
+                    1.0,
+                    (batch_index + 1) / len(batches),
+                )
+            )
+
+    used_model_final = (
+        max(
+            set(used_models),
+            key=used_models.count,
+        )
+        if used_models
+        else PRIMARY_MODEL
+    )
+
+    return translations, used_model_final, total
+
+
+def snapshot_workbook_structure(wb):
+    snapshot = {}
+
+    for ws in wb.worksheets:
+        snapshot[ws.title] = {
+            "max_row": ws.max_row,
+            "max_column": ws.max_column,
+            "column_widths": {
+                key: ws.column_dimensions[key].width
+                for key in ws.column_dimensions
+            },
+            "row_heights": {
+                r: ws.row_dimensions[r].height
+                for r in range(1, ws.max_row + 1)
+                if ws.row_dimensions[r].height is not None
+            },
+            "row_hidden": {
+                r: ws.row_dimensions[r].hidden
+                for r in range(1, ws.max_row + 1)
+                if ws.row_dimensions[r].hidden
+            },
+            "merged_ranges": [
+                str(x) for x in ws.merged_cells.ranges
+            ],
+            "freeze_panes": ws.freeze_panes,
+        }
+
+    return snapshot
+
+
+def build_translation_rows(wb, translation_map, original_items):
+    rows_by_sheet = {}
+
+    for item in original_items:
+        item_id = item["id"]
+        if item_id not in translation_map:
+            continue
+        sheet = item["sheet"]
+        row = item["row"]
+        rows_by_sheet.setdefault(sheet, set()).add(row)
+
+    for ws in wb.worksheets:
+        target_rows = rows_by_sheet.get(ws.title, set())
+        if not target_rows:
+            continue
+
+        original_max_col = ws.max_column
+
+        for row in sorted(target_rows, reverse=True):
+            merged_before = []
+            for merged in list(ws.merged_cells.ranges):
+                min_col, min_row, max_col, max_row = range_boundaries(str(merged))
+                if min_row <= row <= max_row:
+                    merged_before.append((min_col, min_row, max_col, max_row))
+
+            for merged in list(ws.merged_cells.ranges):
+                min_col, min_row, max_col, max_row = range_boundaries(str(merged))
+                if min_row <= row <= max_row:
+                    ws.unmerge_cells(str(merged))
+
+            ws.insert_rows(row + 1, amount=1)
+            copy_row_dimension(ws, row, row + 1)
+
+            for col in range(1, original_max_col + 1):
+                src = ws.cell(row, col)
+                dst = ws.cell(row + 1, col)
+
+                copy_cell_style(src, dst)
+
+                if src.hyperlink:
+                    dst._hyperlink = copy.copy(src.hyperlink)
+                if src.comment:
+                    dst.comment = copy.copy(src.comment)
+
+                dst.value = src.value
+
+            for item in original_items:
+                if item["sheet"] != ws.title:
+                    continue
+                if item["row"] != row:
+                    continue
+
+                item_id = item["id"]
+                if item_id not in translation_map:
+                    continue
+
+                col = item["column"]
+                src = ws.cell(row, col)
+                dst = ws.cell(row + 1, col)
+
+                original_text = item["text"]
+                translated_text = translation_map[item_id]
+
+                if direction == "Trung → Việt":
+                    src.value = original_text
+                    dst.value = translated_text
+                else:
+                    src.value = translated_text
+                    dst.value = original_text
+
+            for (min_col, min_row, max_col, max_row) in merged_before:
+                if min_row == row and max_row == row:
+                    range_original = f"{get_column_letter(min_col)}{row}:{get_column_letter(max_col)}{row}"
+                    range_translation = f"{get_column_letter(min_col)}{row + 1}:{get_column_letter(max_col)}{row + 1}"
+
+                    try:
+                        ws.merge_cells(range_original)
+                    except Exception:
+                        pass
+                    try:
+                        ws.merge_cells(range_translation)
+                    except Exception:
+                        pass
+                else:
+                    shifted_min_row = min_row + (1 if min_row > row else 0)
+                    shifted_max_row = max_row + 1 if max_row >= row else max_row
+
+                    new_range = f"{get_column_letter(min_col)}{shifted_min_row}:{get_column_letter(max_col)}{shifted_max_row}"
+
+                    try:
+                        ws.merge_cells(new_range)
+                    except Exception:
+                        pass
+
+            if ws.row_dimensions[row].hidden:
+                ws.row_dimensions[row + 1].hidden = True
+
+
+def apply_translations_to_excel(wb, translation_map, original_items):
+    build_translation_rows(
+        wb=wb,
+        translation_map=translation_map,
+        original_items=original_items,
+    )
+    return wb
+
+
+# ============================================================
+# IMAGE OCR + TRANSLATION
+# ============================================================
+
+def image_font(size, bold=False):
+    candidates = []
+
+    if os.name == "nt":
+        candidates.extend(
+            [
+                r"C:\Windows\Fonts\msyh.ttc",
+                r"C:\Windows\Fonts\simhei.ttf",
+                r"C:\Windows\Fonts\arial.ttf",
+            ]
+        )
+
+    candidates.extend(
+        [
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
+        ]
+    )
+
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size=size)
+            except Exception:
+                pass
+
+    return ImageFont.load_default()
+
+
+def ocr_image_with_gemini(image_bytes, mime_type):
+    prompt = """
+Analyze the provided image as an OCR engine.
+ 
+Detect all visible Chinese or Vietnamese text.
+ 
+For each text region return:
+- id
+- original_text
+- x1
+- y1
+- x2
+- y2
+ 
+Coordinates must be normalized from 0 to 1000.
+ 
+Important:
+1. Do not invent text.
+2. Preserve the exact original text.
+3. Ignore purely decorative elements.
+4. Include text from tables, labels, forms and documents.
+5. Keep each logical text line as a separate item.
+ 
+Return JSON only:
+ 
+{
+  "items": [
+    {
+      "id": 1,
+     "original_text": "...",
+      "x1": 100,
+      "y1": 100,
+      "x2": 400,
+      "y2": 150
+    }
+  ]
+}
+"""
+
+    raw, used_model = gemini_generate(
+        prompt=prompt,
+        model=PRIMARY_MODEL,
+        image=image_bytes,
+        mime_type=mime_type,
+    )
+
+    data = extract_json(raw)
+    items = data.get("items", [])
+
+    return items, used_model
+
+
+def translate_image_items(items):
+    valid_items = []
+
+    for item in items:
+        text = clean_text(item.get("original_text", ""))
+
+        if not text:
+            continue
+
+        if not should_translate_cell(text):
+            continue
+
+        valid_items.append(
+            {
+                "id": int(item.get("id", len(valid_items) + 1)),
+                "text": text,
+            }
+        )
+
+    if not valid_items:
+        return {}, PRIMARY_MODEL
+
+    result, used_model = translate_batch_with_gemini(valid_items)
+
+    return result, used_model
+
+
+def draw_text_with_background(draw, xy, text, font, fill, background, padding=4):
+    x, y = xy
+    bbox = draw.textbbox((x, y), text, font=font)
+
+    draw.rectangle(
+        (
+            bbox[0] - padding,
+            bbox[1] - padding,
+            bbox[2] + padding,
+            bbox[3] + padding,
+        ),
+        fill=background,
+    )
+
+    draw.text((x, y), text, font=font, fill=fill)
+
+
+def process_image(image_bytes, mime_type):
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    width, height = image.size
+
+    ocr_items, ocr_model = ocr_image_with_gemini(image_bytes, mime_type)
+    translations, translation_model = translate_image_items(ocr_items)
+
+    output = image.copy()
+    draw = ImageDraw.Draw(output)
+
+    default_font = image_font(max(16, int(width / 80)))
+
+    for item in ocr_items:
+        item_id = int(item.get("id", 0))
+        original_text = clean_text(item.get("original_text", ""))
+
+        if not original_text:
+            continue
+
+        translated = translations.get(item_id, "")
+
+        if not translated:
+            continue
+
+        x1 = float(item.get("x1", 0)) / 1000 * width
+        y1 = float(item.get("y1", 0)) / 1000 * height
+        x2 = float(item.get("x2", 0)) / 1000 * width
+        y2 = float(item.get("y2", 0)) / 1000 * height
+
+        box_height = max(1, y2 - y1)
+        font_size = max(14, int(box_height * 0.8))
+        font = image_font(font_size)
+
+        if direction == "Trung → Việt":
+            tx = x1
+            ty = y2 + 4
+
+            if ty + font_size + 10 > height:
+                ty = max(0, y1 - font_size - 8)
+
+            draw_text_with_background(
+                draw=draw,
+                xy=(tx, ty),
+                text=translated,
+                font=font,
+                fill=(0, 80, 0),
+                background=(255, 255, 255),
+            )
+        else:
+            tx = x1
+            ty = y1 - font_size - 8
+
+            if ty < 0:
+                ty = y2 + 4
+
+            draw_text_with_background(
+                draw=draw,
+                xy=(tx, ty),
+                text=translated,
+                font=font,
+                fill=(0, 0, 150),
+                background=(255, 255, 255),
+            )
+
+    output_buffer = io.BytesIO()
+    output.save(output_buffer, format="PNG")
+    output_buffer.seek(0)
+
+    return (
+        output_buffer.getvalue(),
+        ocr_model,
+        translation_model,
+        len(ocr_items),
+    )
+
+
+# ============================================================
+# FILE UPLOAD
+# ============================================================
+
+uploaded_file = st.file_uploader(
+    "📁 Tải file lên",
+    type=SUPPORTED_EXTENSIONS,
+    help="Hỗ trợ XLSX, XLSM, PNG, JPG, JPEG.",
+)
+
+
+# ============================================================
+# MAIN PROCESS
+# ============================================================
+
+if uploaded_file is not None:
+    extension = uploaded_file.name.rsplit(".", 1)[-1].lower()
+
+    st.info(f"📄 File: **{uploaded_file.name}**")
+
+    if not API_KEY:
+        st.error("❌ Chưa có GEMINI_API_KEY.")
+        st.markdown(
+            """
+### Cách cấu hình
+
+**Cách 1 – Nhập API key trực tiếp ở Sidebar**
+
+**Cách 2 – Cấu hình trên Streamlit Cloud (Secrets):**
+```toml
+GEMINI_API_KEY = "AIza..."
