@@ -1,740 +1,267 @@
 import io
-import os
-import re
-import copy
-import hashlib
-from pathlib import Path
-
-import streamlit as st
-from PIL import Image, ImageDraw, ImageFont
+import cv2
 import numpy as np
-import openpyxl
-from openpyxl.cell.cell import MergedCell
+import pandas as pd
+import streamlit as st
 from deep_translator import GoogleTranslator
-import easyocr
+import openpyxl
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from PIL import Image
 
-
-# ============================================================
-# CẤU HÌNH
-# ============================================================
+# Cấu hình trang Streamlit
 st.set_page_config(
-    page_title="Dịch Song Ngữ Trung - Việt",
-    page_icon="🌐",
+    page_title="Phần mềm dịch song ngữ Trung - Việt (Excel & Ảnh)",
     layout="wide",
 )
 
-SUPPORTED_IMAGE_TYPES = ["png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"]
-SUPPORTED_EXCEL_TYPES = ["xlsx", "xlsm"]
+
+# Hàm dịch văn bản
+def translate_text(text, src_lang, dest_lang):
+  if not text or str(text).strip() == "":
+    return ""
+  # Chuyển đổi mã ngôn ngữ cho deep-translator (zh-CN và vi)
+  try:
+    translator = GoogleTranslator(source=src_lang, target=dest_lang)
+    # Nếu là số hoặc công thức thì giữ nguyên
+    if isinstance(text, (int, float)):
+      return text
+    translated = translator.translate(str(text))
+    return translated
+  except Exception as e:
+    return text
 
 
-# ============================================================
-# CACHE OCR
-# ============================================================
-@st.cache_resource
-def load_ocr_reader():
-    # EasyOCR không cần "vi" để nhận diện mọi trường hợp; giữ ch/en để
-    # nhận diện Trung + Latin tốt hơn.
-    return easyocr.Reader(["ch_sim", "en"], gpu=False)
+# Giao diện ứng dụng
+st.title("🧮 Ứng dụng dịch song ngữ Trung - Việt cho File Excel & Ảnh")
+st.markdown(
+    "Hỗ trợ tải lên file Excel hoặc Ảnh chứa bảng, dịch tự động và xuất ra file"
+    " Excel giữ nguyên định dạng."
+)
 
+# Sidebar cấu hình
+st.sidebar.header("Cấu hình dịch")
+direction = st.sidebar.selectbox(
+    "Chọn chiều dịch:",
+    ("Trung -> Việt", "Việt -> Trung"),
+)
 
-# ============================================================
-# DỊCH
-# ============================================================
-@st.cache_data(show_spinner=False)
-def cached_translate(text: str, direction: str) -> str:
-    text = str(text).strip()
-    if not text:
-        return ""
+if direction == "Trung -> Việt":
+  src = "zh-cn"
+  dest = "vi"
+else:
+  src = "vi"
+  dest = "zh-cn"
 
-    # Không dịch các ô chỉ chứa số / ký hiệu.
-    if re.fullmatch(r"[\d\s.,%+\-*/=()（）【\]{}:;，。！？!?_/\\]+", text):
-        return text
+option_style = st.sidebar.radio(
+    "Kiểu hiển thị sau khi dịch:",
+    ("Chỉ ghi đè bản dịch", "Hiển thị song ngữ (Dòng gốc + Dòng dịch)"),
+)
 
-    source, target = (
-        ("zh-CN", "vi") if direction == "Trung - Việt"
-        else ("vi", "zh-CN")
-    )
+uploaded_file = st.file_uploader(
+    "Tải lên file Excel (.xlsx) hoặc Ảnh (.png, .jpg)", type=["xlsx", "png", "jpg", "jpeg"]
+)
 
-    try:
-        return GoogleTranslator(source=source, target=target).translate(text) or ""
-    except Exception as exc:
-        return f"[LỖI DỊCH: {exc}]"
+if uploaded_file is not None:
+  file_extension = uploaded_file.name.split(".")[-1].lower()
 
+  # ================= TRƯỜNG HỢP 1: XỬ LÝ FILE EXCEL =================
+  if file_extension == "xlsx":
+    st.info("Đang xử lý file Excel...")
 
-def translate_text(text, direction):
-    if text is None:
-        return None
-    return cached_translate(str(text), direction)
+    # Đọc file bằng openpyxl để giữ định dạng
+    excel_bytes = uploaded_file.read()
+    wb = openpyxl.load_workbook(io.BytesIO(excel_bytes))
+    ws = wb.active
 
-
-# ============================================================
-# HÀM HỖ TRỢ EXCEL
-# ============================================================
-def is_formula(value):
-    return isinstance(value, str) and value.startswith("=")
-
-
-def contains_translatable_text(value):
-    if value is None:
-        return False
-    text = str(value).strip()
-    if not text:
-        return False
-    if is_formula(text):
-        return False
-    return not bool(re.fullmatch(r"[\d\s.,%+\-*/=()（）【\]{}:;，。！？!?_/\\]+", text))
-
-
-def make_bilingual(original, translated, direction):
-    if direction == "Trung - Việt":
-        chinese = str(original)
-        vietnamese = str(translated)
-    else:
-        chinese = str(translated)
-        vietnamese = str(original)
-
-    return f"{chinese}\n{vietnamese}"
-
-
-def adjust_row_height(ws, row_idx, original_height, extra_lines=1):
-    if original_height is None:
-        return
-
-    base = float(original_height)
-    factor = max(1.0, 1.0 + 0.9 * extra_lines)
-    new_height = max(base, base * factor)
-    ws.row_dimensions[row_idx].height = min(new_height, 409.0)
-
-
-def load_excel_preserving_features(file_obj, extension):
-    file_obj.seek(0)
-    keep_vba = extension.lower() == "xlsm"
-    return openpyxl.load_workbook(
-        file_obj,
-        read_only=False,
-        data_only=False,
-        keep_vba=keep_vba,
-    )
-
-
-def process_excel(file_obj, direction):
-    extension = Path(file_obj.name).suffix.lower().lstrip(".")
-    if extension not in SUPPORTED_EXCEL_TYPES:
-        raise ValueError(
-            "Phiên bản này hỗ trợ .xlsx và .xlsm. "
-            "File .xls cũ cần chuyển sang .xlsx trước khi dịch."
-        )
-
-    wb = load_excel_preserving_features(file_obj, extension)
-
-    translated_count = 0
-    skipped_count = 0
-    warnings = []
-
-    for ws in wb.worksheets:
-        original_row_heights = {
-            idx: ws.row_dimensions[idx].height
-            for idx in range(1, ws.max_row + 1)
-        }
-
+    with st.spinner("Đang tiến hành dịch nội dung các ô..."):
+      if option_style == "Chỉ ghi đè bản dịch":
         for row in ws.iter_rows():
-            for cell in row:
-                if isinstance(cell, MergedCell):
-                    continue
+          for cell in row:
+            if cell.value:
+              cell.value = translate_text(cell.value, src, dest)
+      else:
+        # Kiểu song ngữ: Chèn thêm 1 dòng dịch bên dưới (tương tự như ảnh mẫu của bạn)
+        # Duyệt từ dưới lên để tránh lỗi lệch index khi insert dòng
+        max_row = ws.max_row
+        max_col = ws.max_column
 
-                value = cell.value
+        # Ta sẽ duyệt qua từng dòng theo chiều ngược lại
+        for r in range(max_row, 0, -1):
+          # Kiểm tra xem dòng này có dữ liệu không
+          has_data = any(ws.cell(row=r, column=c).value for c in range(1, max_col + 1))
+          if has_data:
+            # Chèn 1 dòng mới phía dưới dòng hiện tại
+            ws.insert_rows(r + 1)
 
-                if not contains_translatable_text(value):
-                    skipped_count += 1
-                    continue
+            # Copy định dạng và dịch dữ liệu sang dòng mới
+            for c in range(1, max_col + 1):
+              orig_cell = ws.cell(row=r, column=c)
+              new_cell = ws.cell(row=r + 1, column=c)
 
-                original = str(value)
+              # Sao chép style cơ bản
+              if orig_cell.font:
+                # Tạo font nhỏ hơn chút cho dòng dịch nếu muốn
+                new_cell.font = Font(
+                    name=orig_cell.font.name,
+                    size=max(8, orig_cell.font.size - 1),
+                    italic=True,
+                    color="555555",
+                )
+              if orig_cell.alignment:
+                new_cell.alignment = Alignment(
+                    horizontal=orig_cell.alignment.horizontal,
+                    vertical=orig_cell.alignment.vertical,
+                )
+              if orig_cell.border:
+                new_cell.border = orig_cell.border
+              if orig_cell.fill:
+                new_cell.fill = orig_cell.fill
 
-                try:
-                    translated = translate_text(original, direction)
-                    if not translated:
-                        skipped_count += 1
-                        continue
+              # Thực hiện dịch và gán vào dòng dưới
+              if orig_cell.value:
+                new_cell.value = translate_text(orig_cell.value, src, dest)
 
-                    if str(translated).startswith("[LỖI DỊCH:"):
-                        warnings.append(
-                            f"{ws.title}!{cell.coordinate}: {translated}"
-                        )
-                        continue
-
-                    if "\n" in original:
-                        lines = original.splitlines()
-                        if len(lines) >= 2:
-                            skipped_count += 1
-                            continue
-
-                    cell.value = make_bilingual(original, translated, direction)
-
-                    old_alignment = copy.copy(cell.alignment)
-                    old_alignment.wrap_text = True
-                    cell.alignment = old_alignment
-
-                    row_height = original_row_heights.get(cell.row)
-                    if row_height is not None:
-                        adjust_row_height(
-                            ws,
-                            cell.row,
-                            row_height,
-                            extra_lines=1,
-                        )
-
-                    translated_count += 1
-
-                except Exception as exc:
-                    warnings.append(
-                        f"{ws.title}!{cell.coordinate}: {type(exc).__name__}: {exc}"
-                    )
-
+    # Lưu file ra bộ nhớ tạm để tải về
     output = io.BytesIO()
-    output_format = "xlsm" if extension == "xlsm" else "xlsx"
-
     wb.save(output)
     output.seek(0)
 
-    return output, translated_count, skipped_count, warnings, output_format
-
-
-# ============================================================
-# HỖ TRỢ FONT CHO HÌNH ẢNH
-# ============================================================
-def find_font():
-    candidates = [
-        r"C:\Windows\Fonts\msyh.ttc",
-        r"C:\Windows\Fonts\msyh.ttf",
-        r"C:\Windows\Fonts\simhei.ttf",
-        r"C:\Windows\Fonts\simsun.ttc",
-        r"C:\Windows\Fonts\arialuni.ttf",
-        r"C:\Windows\Fonts\arial.ttf",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.otf",
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.otf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/System/Library/Fonts/PingFang.ttc",
-        "/System/Library/Fonts/Hiragino Sans GB.ttc",
-        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-    ]
-
-    for path in candidates:
-        if os.path.exists(path):
-            return path
-
-    return None
-
-
-def load_font(font_path, size):
-    if font_path:
-        try:
-            return ImageFont.truetype(font_path, max(8, int(size)))
-        except Exception:
-            pass
-    return ImageFont.load_default()
-
-
-def bbox_to_rect(bbox):
-    xs = [p[0] for p in bbox]
-    ys = [p[1] for p in bbox]
-    return (
-        int(min(xs)),
-        int(min(ys)),
-        int(max(xs)),
-        int(max(ys)),
+    st.success("Dịch thành công file Excel!")
+    st.download_button(
+        label="📥 Tải xuống file Excel đã dịch",
+        data=output,
+        file_name=f"translated_{uploaded_file.name}",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-
-def group_ocr_lines(results, y_tolerance_ratio=0.55):
-    items = []
-
-    for bbox, text, prob in results:
-        if prob < 0.20 or not str(text).strip():
-            continue
-
-        x1, y1, x2, y2 = bbox_to_rect(bbox)
-        h = max(1, y2 - y1)
-        center_y = (y1 + y2) / 2
-
-        items.append({
-            "text": str(text).strip(),
-            "x1": x1,
-            "y1": y1,
-            "x2": x2,
-            "y2": y2,
-            "h": h,
-            "cy": center_y,
-        })
-
-    items.sort(key=lambda x: (x["cy"], x["x1"]))
-
-    lines = []
-
-    for item in items:
-        placed = False
-
-        for line in lines:
-            avg_cy = sum(i["cy"] for i in line) / len(line)
-            avg_h = sum(i["h"] for i in line) / len(line)
-
-            if abs(item["cy"] - avg_cy) <= max(4, avg_h * y_tolerance_ratio):
-                line.append(item)
-                placed = True
-                break
-
-        if not placed:
-            lines.append([item])
-
-    output = []
-
-    for line in lines:
-        line.sort(key=lambda x: x["x1"])
-        text = " ".join(i["text"] for i in line)
-
-        output.append({
-            "text": text,
-            "x1": min(i["x1"] for i in line),
-            "y1": min(i["y1"] for i in line),
-            "x2": max(i["x2"] for i in line),
-            "y2": max(i["y2"] for i in line),
-            "height": max(i["h"] for i in line),
-        })
-
-    output.sort(key=lambda x: (x["y1"], x["x1"]))
-    return output
-
-
-def text_size(draw, text, font):
-    try:
-        box = draw.textbbox((0, 0), text, font=font)
-        return box[2] - box[0], box[3] - box[1]
-    except Exception:
-        return draw.textsize(text, font=font)
-
-
-def fit_font_to_width(draw, text, font_path, initial_size, max_width):
-    size = max(8, int(initial_size))
-
-    while size > 8:
-        font = load_font(font_path, size)
-        width, _ = text_size(draw, text, font)
-        if width <= max_width:
-            return font
-        size -= 1
-
-    return load_font(font_path, 8)
-
-
-def choose_background_color(image, box, sample_padding=3):
-    x1, y1, x2, y2 = box
-
-    crop = image.crop((
-        max(0, x1 - sample_padding),
-        max(0, y1 - sample_padding),
-        min(image.width, x2 + sample_padding),
-        min(image.height, y2 + sample_padding),
-    ))
-
-    arr = np.asarray(crop).astype(np.float32)
-
-    if arr.size == 0:
-        return (255, 255, 255)
-
-    mean = arr.reshape(-1, arr.shape[-1]).mean(axis=0)
-
-    return tuple(int(max(0, min(255, x))) for x in mean[:3])
-
-
-def contrast_text_color(bg):
-    r, g, b = bg
-    luminance = 0.299 * r + 0.587 * g + 0.114 * b
-    return (20, 20, 20) if luminance > 150 else (245, 245, 245)
-
-
-def draw_translation_below(
-    base_image,
-    line,
-    translated,
-    font_path,
-    direction,
-):
-    draw = ImageDraw.Draw(base_image)
-
-    x1, y1, x2, y2 = (
-        line["x1"],
-        line["y1"],
-        line["x2"],
-        line["y2"],
-    )
-
-    original_h = max(10, y2 - y1)
-    font_size = max(12, int(original_h * 0.72))
-    max_width = max(80, min(base_image.width - x1 - 5, max(120, x2 - x1) * 1.35))
-
-    font = fit_font_to_width(
-        draw,
-        translated,
-        font_path,
-        font_size,
-        max_width,
-    )
-
-    _, text_h = text_size(draw, translated, font)
-
-    gap = max(3, int(original_h * 0.18))
-    top = y2 + gap
-    bottom = top + text_h + gap
-
-    if bottom > base_image.height:
-        extra = bottom - base_image.height + gap
-        expanded = Image.new(
-            "RGB",
-            (base_image.width, base_image.height + extra),
-            (255, 255, 255),
-        )
-        expanded.paste(base_image, (0, 0))
-        base_image = expanded
-        draw = ImageDraw.Draw(base_image)
-
-    bg = choose_background_color(base_image, (x1, y1, x2, y2))
-    text_color = contrast_text_color(bg)
-
-    pad_x = 3
-    pad_y = 1
-
-    bbox = draw.textbbox(
-        (x1, top),
-        translated,
-        font=font,
-    )
-
-    rect = (
-        max(0, bbox[0] - pad_x),
-        max(0, bbox[1] - pad_y),
-        min(base_image.width, bbox[2] + pad_x),
-        min(base_image.height, bbox[3] + pad_y),
-    )
-
-    draw.rectangle(rect, fill=bg)
-
-    draw.text(
-        (x1, top),
-        translated,
-        font=font,
-        fill=text_color,
-    )
-
-    return base_image
-
-
-# ============================================================
-# XỬ LÝ HÌNH ẢNH
-# ============================================================
-def process_image(image_file, direction):
-    reader = load_ocr_reader()
-
-    image_file.seek(0)
-    original = Image.open(image_file)
-    image = original.convert("RGB")
-
-    img_np = np.array(image)
-    results = reader.readtext(img_np)
-
-    lines = group_ocr_lines(results)
-
-    output = image.copy()
-    font_path = find_font()
-
-    if not lines:
-        return output, 0, [
-            "Không nhận diện được chữ trong ảnh. Hãy thử ảnh có độ phân giải cao hơn."
-        ]
-
-    translated_count = 0
-    warnings = []
-
-    for line in lines:
-        original_text = line["text"]
-
-        if not contains_translatable_text(original_text):
-            continue
-
-        try:
-            translated = translate_text(original_text, direction)
-
-            if not translated:
-                continue
-
-            if str(translated).startswith("[LỖI DỊCH:"):
-                warnings.append(
-                    f'OCR "{original_text}": {translated}'
-                )
-                continue
-
-            vietnamese = (
-                translated if direction == "Trung - Việt"
-                else original_text
-            )
-            chinese = (
-                original_text if direction == "Trung - Việt"
-                else translated
-            )
-
-            if direction == "Việt - Trung":
-                x1, y1, x2, y2 = (
-                    line["x1"], line["y1"], line["x2"], line["y2"]
-                )
-
-                pad = max(4, int(line["height"] * 0.25))
-
-                bg = choose_background_color(
-                    output,
-                    (x1, y1, x2, y2),
-                    sample_padding=pad,
-                )
-
-                draw = ImageDraw.Draw(output)
-                draw.rectangle(
-                    (
-                        max(0, x1 - pad),
-                        max(0, y1 - pad),
-                        min(output.width, x2 + pad),
-                        min(output.height, y2 + pad),
-                    ),
-                    fill=bg,
-                )
-
-                font = fit_font_to_width(
-                    draw,
-                    chinese,
-                    font_path,
-                    max(12, int(line["height"] * 0.82)),
-                    max(80, x2 - x1),
-                )
-
-                draw.text(
-                    (x1, y1),
-                    chinese,
-                    font=font,
-                    fill=contrast_text_color(bg),
-                )
-
-                output = draw_translation_below(
-                    output,
-                    {
-                        **line,
-                        "y2": y1 + line["height"],
-                    },
-                    vietnamese,
-                    font_path,
-                    direction,
-                )
-
-            else:
-                output = draw_translation_below(
-                    output,
-                    line,
-                    vietnamese,
-                    font_path,
-                    direction,
-                )
-
-            translated_count += 1
-
-        except Exception as exc:
-            warnings.append(
-                f'OCR "{original_text}": {type(exc).__name__}: {exc}'
-            )
-
-    return output, translated_count, warnings
-
-
-# ============================================================
-# GIAO DIỆN STREAMLIT
-# ============================================================
-st.title("🌐 Ứng dụng dịch song ngữ Trung ↔ Việt")
-st.caption(
-    "Giữ nội dung gốc và đặt tiếng Việt ngay bên dưới tiếng Trung."
-)
-
-with st.sidebar:
-    st.header("⚙️ Cấu hình")
-
-    direction = st.selectbox(
-        "Chiều dịch",
-        ["Trung - Việt", "Việt - Trung"],
-        index=0,
-    )
-
-    st.divider()
-
-    st.markdown("### Quy tắc kết quả")
-    st.markdown(
-        """
-        **Luôn hiển thị:**
-
-        🇨🇳 Tiếng Trung  
-        🇻🇳 Tiếng Việt
-
-        Với Excel, bản dịch nằm trong **cùng ô** và xuống dòng.
-        """
-    )
-
-uploaded_file = st.file_uploader(
-    "📤 Tải file lên",
-    type=SUPPORTED_EXCEL_TYPES + SUPPORTED_IMAGE_TYPES,
-    help="Excel: .xlsx/.xlsm | Hình ảnh: .png/.jpg/.jpeg/.webp/.bmp/.tif/.tiff",
-)
-
-if uploaded_file is None:
-    st.info("Hãy tải file Excel hoặc hình ảnh để bắt đầu.")
-    st.stop()
-
-extension = Path(uploaded_file.name).suffix.lower().lstrip(".")
-
-st.write(f"**File:** `{uploaded_file.name}`")
-
-# ============================================================
-# EXCEL
-# ============================================================
-if extension in SUPPORTED_EXCEL_TYPES:
+  # ================= TRƯỜNG HỢP 2: XỬ LÝ FILE ẢNH =================
+  elif file_extension in ["png", "jpg", "jpeg"]:
     st.info(
-        "📊 Excel: app chỉnh trực tiếp workbook gốc trong bộ nhớ, "
-        "thay vì tạo workbook mới, nhằm bảo toàn tối đa cấu trúc/định dạng."
+        "Đang xử lý ảnh (Sử dụng OCR để bóc tách văn bản và tạo bảng Excel)..."
     )
 
-    col1, col2 = st.columns([1, 3])
+    image_bytes = uploaded_file.read()
+    image = Image.open(io.BytesIO(image_bytes))
 
-    with col1:
-        start_excel = st.button(
-            "🚀 Bắt đầu dịch Excel",
-            type="primary",
-            use_container_width=True,
-        )
+    # Hiển thị ảnh tải lên
+    st.image(image, caption="Ảnh gốc tải lên", use_container_width=True)
 
-    if start_excel:
-        with st.spinner(
-            "Đang dịch Excel. Với file lớn có thể mất thời gian..."
-        ):
-            try:
-                (
-                    output_excel,
-                    translated_count,
-                    skipped_count,
-                    warnings,
-                    output_format,
-                ) = process_excel(
-                    uploaded_file,
-                    direction,
-                )
+    with st.spinner("Đang nhận diện chữ trong ảnh (OCR)..."):
+      import easyocr
 
-                st.success(
-                    f"✅ Hoàn tất: đã dịch {translated_count} ô."
-                )
+      # Khởi tạo reader của EasyOCR (hỗ trợ tiếng Trung và tiếng Anh/Việt)
+      # lang_list: 'ch_sim' (Trung giản thể), 'vi' (Tiếng Việt), 'en' (Tiếng Anh)
+      reader = easyocr.Reader(["ch_sim", "en", "vi"], gpu=False)
 
-                if skipped_count:
-                    st.caption(
-                        f"Đã bỏ qua {skipped_count} ô không cần dịch "
-                        f"(ô trống, số/ký hiệu, công thức hoặc nội dung đã song ngữ)."
-                    )
+      img_np = np.array(image)
+      results = reader.readtext(img_np)
 
-                if warnings:
-                    with st.expander(
-                        f"⚠️ Có {len(warnings)} cảnh báo"
-                    ):
-                        for warning in warnings[:100]:
-                            st.warning(warning)
+    if not results:
+      st.warning(
+          "Không tìm thấy văn bản nào trong ảnh. Vui lòng thử ảnh rõ nét hơn."
+      )
+    else:
+      # Sắp xếp các text box theo tọa độ Y trước, rồi đến X để gom nhóm thành các hàng
+      # Mỗi item trong results: (bbox, text, probability)
+      # bbox là 4 điểm tọa độ: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
 
-                original_stem = Path(uploaded_file.name).stem
-                output_name = (
-                    f"{original_stem}_song_ngu.{output_format}"
-                )
+      # Xử lý đơn giản: Chuyển toàn bộ kết quả OCR thành DataFrame mô phỏng dạng bảng
+      data_rows = []
+      # Sắp xếp theo tọa độ y trung bình
+      sorted_results = sorted(results, key=lambda x: (x[0][0][1] // 15, x[0][0][0]))
 
-                mime = (
-                    "application/vnd.ms-excel.sheet.macroEnabled.12"
-                    if output_format == "xlsm"
-                    else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+      # Gom nhóm các text theo dòng (dựa vào khoảng cách tọa độ Y tương đối)
+      current_y = -1
+      current_row = []
+      rows_grouped = []
 
-                st.download_button(
-                    "📥 Download Excel đã dịch",
-                    data=output_excel.getvalue(),
-                    file_name=output_name,
-                    mime=mime,
-                    type="primary",
-                    use_container_width=True,
-                )
+      for bbox, text, prob in results:
+        y_center = (bbox[0][1] + bbox[2][1]) / 2
+        x_center = (bbox[0][0] + bbox[1][0]) / 2
+        data_rows.append({"y": y_center, "x": x_center, "text": text})
 
-            except Exception as exc:
-                st.error("❌ Không thể xử lý Excel.")
-                st.exception(exc)
+      # Sắp xếp toàn bộ theo y
+      data_rows = sorted(data_rows, key=lambda k: k["y"])
 
-# ============================================================
-# IMAGE
-# ============================================================
-elif extension in SUPPORTED_IMAGE_TYPES:
-    st.info(
-        "🖼️ Hình ảnh: OCR từng dòng và đặt bản dịch ngay phía dưới. "
-        "Ảnh có thể được mở rộng chiều cao nếu phía dưới không đủ chỗ."
-    )
+      # Gom các ô có cùng tầm y vào một hàng (ngưỡng sai số 15 pixel)
+      table_matrix = []
+      if data_rows:
+        row_group = [data_rows[0]]
+        last_y = data_rows[0]["y"]
 
-    start_image = st.button(
-        "🚀 Bắt đầu dịch hình ảnh",
-        type="primary",
-        use_container_width=True,
-    )
+        for item in data_rows[1:]:
+          if abs(item["y"] - last_y) < 18:  cùng dòng
+            row_group.append(item)
+          else:
+            # Sắp xếp các ô trong dòng theo thứ tự từ trái qua phải (tọa độ x)
+            row_group = sorted(row_group, key=lambda k: k["x"])
+            table_matrix.append([i["text"] for i in row_group])
+            row_group = [item]
+            last_y = item["y"]
+        # Thêm dòng cuối
+        if row_group:
+          row_group = sorted(row_group, key=lambda k: k["x"])
+          table_matrix.append([i["text"] for i in row_group])
 
-    if start_image:
-        with st.spinner("Đang OCR và dịch hình ảnh..."):
-            try:
-                result_img, translated_count, warnings = process_image(
-                    uploaded_file,
-                    direction,
-                )
+      # Tạo file Excel từ table_matrix
+      wb = openpyxl.Workbook()
+      ws = wb.active
+      ws.title = "Sheet1"
 
-                st.success(
-                    f"✅ Hoàn tất: đã xử lý {translated_count} dòng chữ."
-                )
+      # Định dạng style cho chuyên nghiệp giống ảnh mẫu
+      orange_fill = PatternFill(
+          start_color="ED7D31", end_color="ED7D31", fill_type="solid"
+      )
+      white_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+      thin_border = Border(
+          left=Side(style="thin", color="000000"),
+          right=Side(style="thin", color="000000"),
+          top=Side(style="thin", color="000000"),
+          bottom=Side(style="thin", color="000000"),
+      )
 
-                if warnings:
-                    with st.expander(
-                        f"⚠️ Có {len(warnings)} cảnh báo"
-                    ):
-                        for warning in warnings[:100]:
-                            st.warning(warning)
+      for r_idx, r_data in enumerate(table_matrix, start=1):
+        # Dòng gốc
+        translated_row = []
+        for c_idx, cell_text in enumerate(r_data, start=1):
+          cell = ws.cell(row=r_idx * 2 - 1, column=c_idx, value=cell_text)
+          cell.border = thin_border
+          cell.alignment = Alignment(
+              horizontal="center", vertical="center", wrap_text=True
+          )
+          if r_idx == 1:  # Dòng tiêu đề giả định
+            cell.fill = orange_fill
+            cell.font = white_font
 
-                st.image(
-                    result_img,
-                    caption="Kết quả: tiếng Trung ở trên, tiếng Việt ở dưới",
-                    use_container_width=True,
-                )
+          # Dịch giá trị
+          trans_text = translate_text(cell_text, src, dest)
+          translated_row.append(trans_text)
 
-                buf = io.BytesIO()
-                result_img.save(
-                    buf,
-                    format="PNG",
-                    optimize=False,
-                )
-                buf.seek(0)
+        # Dòng dịch bên dưới (Song ngữ)
+        for c_idx, trans_text in enumerate(translated_row, start=1):
+          cell_trans = ws.cell(row=r_idx * 2, column=c_idx, value=trans_text)
+          cell_trans.border = thin_border
+          cell_trans.alignment = Alignment(
+              horizontal="center", vertical="center", wrap_text=True
+          )
+          cell_trans.font = Font(
+              name="Calibri", size=10, italic=True, color="333333"
+          )
 
-                output_name = (
-                    f"{Path(uploaded_file.name).stem}_song_ngu.png"
-                )
+      output = io.BytesIO()
+      wb.save(output)
+      output.seek(0)
 
-                st.download_button(
-                    "📥 Download hình ảnh đã dịch",
-                    data=buf.getvalue(),
-                    file_name=output_name,
-                    mime="image/png",
-                    type="primary",
-                    use_container_width=True,
-                )
+      st.success("Đã trích xuất và dịch bảng từ ảnh thành công!")
 
-            except Exception as exc:
-                st.error("❌ Không thể xử lý hình ảnh.")
-                st.exception(exc)
-else:
-    st.error("Định dạng file chưa được hỗ trợ.")
+      # Hiển thị bảng xem trước trên giao diện
+      st.write("### Bảng dữ liệu trích xuất & dịch xem trước:")
+      df_preview = pd.DataFrame(table_matrix)
+      st.dataframe(df_preview)
+
+      st.download_button(
+          label="📥 Tải xuống file Excel kết quả",
+          data=output,
+          file_name="translated_from_image.xlsx",
+          mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      )
