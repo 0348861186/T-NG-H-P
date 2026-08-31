@@ -15,14 +15,16 @@ st.set_page_config(
 )
 
 
-# Khởi tạo EasyOCR (chạy caching để tối ưu tốc độ)
+# Khởi tạo EasyOCR (Fix lỗi xung đột ngôn ngữ bằng cách tách riêng hoặc dùng chung chuẩn của EasyOCR)
 @st.cache_resource
-def load_ocr_reader():
-    # Load cả tiếng Trung (ch giản thể/phồn thể) và tiếng Việt/Anh
-    return easyocr.Reader(["ch_sim", "vi", "en"], gpu=False)
+def load_ocr_readers():
+    # EasyOCR yêu cầu tiếng Trung chỉ đi kèm với tiếng Anh, do đó ta khởi tạo 2 reader riêng biệt để quét linh hoạt cả Trung lẫn Việt
+    reader_zh = easyocr.Reader(["ch_sim", "en"], gpu=False)
+    reader_vi = easyocr.Reader(["vi", "en"], gpu=False)
+    return reader_zh, reader_vi
 
 
-reader = load_ocr_reader()
+reader_zh, reader_vi = load_ocr_readers()
 
 
 # Hàm dịch văn bản sử dụng deep-translator
@@ -30,7 +32,6 @@ def translate_text(text, direction):
     if not text or not str(text).strip():
         return text
 
-    # Loại bỏ các chuỗi chỉ có số hoặc ký tự đặc biệt nếu cần, nhưng ở đây cứ để dịch
     try:
         if direction == "Trung - Việt":
             translated = GoogleTranslator(
@@ -47,18 +48,14 @@ def translate_text(text, direction):
 
 # Xử lý dịch file Excel
 def process_excel(file, direction):
-    # Đọc file bằng openpyxl để giữ nguyên định dạng, style, màu sắc...
     wb = openpyxl.load_workbook(file)
     output_wb = openpyxl.Workbook()
-    # Xóa sheet mặc định
-    output_wb.remove(output_wb.active)
+    output_wb.remove(output_wb.active)  # Xóa sheet mặc định
 
     for sheet_name in wb.sheetnames:
         sheet = wb[sheetname]
         new_sheet = output_wb.create_sheet(title=sheet_name)
 
-        # Copy toàn bộ dữ liệu, style, merge cells từ sheet cũ sang sheet mới
-        # 1. Copy giá trị và style cơ bản
         max_row = sheet.max_row
         max_col = sheet.max_column
 
@@ -80,32 +77,19 @@ def process_excel(file, direction):
         for merged_cell in sheet.merged_cells.ranges:
             new_sheet.merge_cells(str(merged_cell))
 
-        # Duyệt qua từng ô để copy style và chèn bản dịch bên dưới
-        # Để chèn dòng dưới mà không làm lệch các dòng khác, chúng ta duyệt từ dưới lên trên hoặc tạo bản sao thông minh.
-        # Tuy nhiên, yêu cầu là "nội dung dịch nằm ngay bên dưới dòng chữ gốc cùng ô".
-        # Trong Excel, nếu ô ở dòng i có chữ, "ngay bên dưới cùng ô" nghĩa là cell ở dòng i+1 (hoặc kết hợp xuống dòng trong cùng 1 ô).
-        # Theo chuẩn Excel chuyên nghiệp và để giữ form tuyệt đối: ta sẽ gộp ô (hoặc ghi đè dòng dưới) hoặc dùng Alt+Enter trong cùng 1 ô.
-        # Yêu cầu: "nội dung dịch nằm ngay bên dưới dòng chữ gốc cùng ô" -> Tốt nhất là nối chuỗi bằng ký tự xuống dòng (Alt + Enter: "\n") trong chính ô đó,
-        # hoặc chèn thêm 1 dòng phụ bên dưới. Chèn dòng sẽ làm thay đổi cấu trúc bảng nếu có nhiều cột.
-        # Vì vậy, cách tối ưu và chuẩn xác nhất cho Excel là gộp chung trong 1 ô nhưng xuống dòng: "Gốc \n Bản dịch" (đảm bảo tiếng Việt luôn nằm dưới tiếng Trung).
-
+        # Duyệt qua từng ô để dịch và ghép nội dung (Tiếng Việt luôn nằm dưới)
         for row in range(1, max_row + 1):
             for col in range(1, max_col + 1):
                 cell = sheet.cell(row=row, column=col)
                 new_cell = new_sheet.cell(row=row, column=col)
 
-                # Copy giá trị
                 val = cell.value
                 if val is not None and str(val).strip() != "":
                     translated_val = translate_text(val, direction)
 
-                    # Đảm bảo thứ tự: Tiếng Trung ở trên, Tiếng Việt ở dưới
                     if direction == "Trung - Việt":
-                        # val là Trung, translated là Việt -> Trung \n Việt
                         combined_val = f"{val}\n{translated_val}"
                     else:
-                        # val là Việt, translated là Trung -> Trung ở trên, Việt ở dưới
-                        # Tức là: translated (Trung) \n val (Việt)
                         combined_val = f"{translated_val}\n{val}"
 
                     new_cell.value = combined_val
@@ -118,8 +102,6 @@ def process_excel(file, direction):
                     new_cell.alignment = copy_alignment(cell.alignment)
                     new_cell.fill = copy_fill(cell.fill)
                     new_cell.border = copy_border(cell.border)
-                    number_format = cell.number_format
-                    # Đảm bảo cell hiển thị xuống dòng được (Wrap text)
                     if new_cell.alignment:
                         new_cell.alignment = Alignment(
                             horizontal=new_cell.alignment.horizontal,
@@ -131,7 +113,6 @@ def process_excel(file, direction):
                     else:
                         new_cell.alignment = Alignment(wrap_text=True)
 
-    # Lưu ra bộ nhớ đệm dạng Bytes
     output = io.BytesIO()
     output_wb.save(output)
     output.seek(0)
@@ -196,14 +177,14 @@ def process_image(image_file, direction):
     image = Image.open(image_file).convert("RGB")
     img_np = np.array(image)
 
-    # Nhận diện văn bản bằng EasyOCR
-    results = reader.readtext(img_np)
+    # Dùng cả 2 reader để quét chữ chính xác cho cả tiếng Trung và tiếng Việt
+    results_zh = reader_zh.readtext(img_np)
+    results_vi = reader_vi.readtext(img_np)
+    results = results_zh + results_vi  # Gộp kết quả nhận diện
 
-    # Tạo bản vẽ lên ảnh để chèn kết quả dịch ngay bên dưới
     draw_image = image.copy()
     draw = ImageDraw.Draw(draw_image)
 
-    # Thử load font chữ hỗ trợ tiếng Trung/Việt (nếu có sẵn trên hệ thống)
     font_path = None
     for path in [
         "C:/Windows/Fonts/arial.ttf",
@@ -215,26 +196,21 @@ def process_image(image_file, direction):
             break
 
     for bbox, text, prob in results:
-        if prob < 0.2:  # Bỏ qua độ chính xác quá thấp
+        if prob < 0.2:
             continue
 
         translated = translate_text(text, direction)
 
-        # Xác định nội dung kết hợp (Tiếng Việt luôn nằm dưới tiếng Trung)
         if direction == "Trung - Việt":
             display_text = f"{text}\n{translated}"
         else:
             display_text = f"{translated}\n{text}"
 
-        # Tọa độ bounding box từ EasyOCR: [TL, TR, BR, BL]
         top_left = bbox[0]
         bottom_left = bbox[3]
         bottom_right = bbox[2]
 
-        box_width = int(bottom_right[0] - top_left[0])
         box_height = int(bottom_left[1] - top_left[1])
-
-        # Thiết lập font size dựa vào chiều cao của ô chữ gốc
         font_size = max(12, int(box_height * 0.4))
         try:
             font = (
@@ -245,16 +221,11 @@ def process_image(image_file, direction):
         except:
             font = ImageFont.load_default()
 
-        # Vẽ text dịch ngay bên dưới dòng gốc
         text_x = int(top_left[0])
-        text_y = int(bottom_left[1] + 2)  # Cách mép dưới của dòng gốc 2 pixel
+        text_y = int(bottom_left[1] + 2)
 
-        # Vẽ viền chữ hoặc nền nhẹ để dễ đọc nếu cần (ở đây viết trực tiếp màu đỏ hoặc xanh nổi bật)
         draw.text(
-            (text_x, text_y),
-            display_text,
-            fill=(255, 0, 0),
-            font=font,
+            (text_x, text_y), display_text, fill=(255, 0, 0), font=font
         )
 
     return draw_image
@@ -291,7 +262,6 @@ if uploaded_file is not None:
                     output_excel = process_excel(uploaded_file, direction)
                     st.success("✨ Dịch file Excel hoàn tất!")
 
-                    # Nút Download file Excel sau khi dịch
                     st.download_button(
                         label="📥 Tải xuống file Excel đã dịch",
                         data=output_excel,
@@ -310,14 +280,12 @@ if uploaded_file is not None:
                     result_img = process_image(uploaded_file, direction)
                     st.success("✨ Dịch hình ảnh hoàn tất!")
 
-                    # Hiển thị ảnh kết quả
                     st.image(
                         result_img,
                         caption="Ảnh sau khi dịch (Tiếng Việt nằm dưới Tiếng Trung)",
                         use_column_width=True,
                     )
 
-                    # Lưu ảnh ra Bytes để tải xuống
                     buf = io.BytesIO()
                     result_img.save(buf, format="PNG")
                     byte_im = buf.getvalue()
