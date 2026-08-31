@@ -448,15 +448,25 @@ tesseract-ocr-vie
 tesseract-ocr-eng
 '''
 
-readme = r'''# Trung ↔ Việt Excel & Image Translator
+readme = """# Trung ↔ Việt Excel & Image Translator
 
 Ứng dụng Streamlit dịch hai chiều:
 
 - Trung → Việt
 - Việt → Trung
-- Excel `.xlsx` / `.xlsm` → Excel đã dịch
-- Ảnh `.png/.jpg/.jpeg/.webp` → OCR → dịch → Excel
-- Excel đầu vào giữ lại các thành phần định dạng chính: sheet, merge cell, font, fill, border, alignment, column width, row height, freeze panes...
+- Excel .xlsx / .xlsm → Excel đã dịch
+- Ảnh .png / .jpg / .jpeg / .webp → OCR → dịch → Excel
+
+Excel đầu vào được giữ lại các thành phần định dạng chính:
+- Sheet
+- Merge cell
+- Font
+- Màu nền
+- Border
+- Alignment
+- Độ rộng cột
+- Chiều cao dòng
+- Freeze panes
 
 ## Chạy local
 
