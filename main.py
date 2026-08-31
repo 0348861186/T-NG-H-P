@@ -208,12 +208,10 @@ if uploaded_file is not None:
                     " khác rõ nét hơn."
                 )
             else:
-                # Tạo một file Excel mới bằng openpyxl để lưu kết quả OCR song ngữ
                 wb_out = openpyxl.Workbook()
                 ws_out = wb_out.active
                 ws_out.title = "KetQua_OCR_SongNgu"
 
-                # Thiết lập tiêu đề bảng Excel
                 ws_out["A1"] = "STT"
                 ws_out["B1"] = (
                     "Nội dung Gốc (Tiếng Trung)"
@@ -227,8 +225,9 @@ if uploaded_file is not None:
                 )
                 ws_out["D1"] = "Độ chính xác OCR"
 
-                # Định dạng Header
-                header_font = Font(name="Arial", size=11, bold=True, color="FFFFFF")
+                header_font = Font(
+                    name="Arial", size=11, bold=True, color="FFFFFF"
+                )
                 header_fill = PatternFill(
                     start_color="4F81BD", end_color="4F81BD", fill_type="solid"
                 )
@@ -252,16 +251,13 @@ if uploaded_file is not None:
                 for idx, (bbox, text, prob) in enumerate(results, 1):
                     translated = translate_text(text)
 
-                    # Ghi dòng gốc và dòng dịch ngay bên dưới (hoặc theo cặp dòng trong Excel)
-                    # Theo yêu cầu: tiếng Việt nằm ngay bên dưới tiếng Trung
                     if direction == "Trung - Việt":
-                        line_upper = text  # Trung trên
-                        line_lower = translated  # Việt dưới
+                        line_upper = text
+                        line_lower = translated
                     else:
-                        line_upper = translated  # Trung trên
-                        line_lower = text  # Việt dưới
+                        line_upper = translated
+                        line_lower = text
 
-                    # Dòng 1: Tiếng Trung
                     ws_out.cell(row=row_idx, column=1, value=idx)
                     ws_out.cell(row=row_idx, column=2, value=line_upper)
                     ws_out.cell(row=row_idx, column=3, value="")
@@ -269,27 +265,27 @@ if uploaded_file is not None:
                         row=row_idx, column=4, value=f"{prob * 100:.1f}%"
                     )
 
-                    # Dòng 2: Tiếng Việt nằm ngay bên dưới
                     ws_out.cell(row=row_idx + 1, column=1, value="")
                     ws_out.cell(row=row_idx + 1, column=2, value="")
                     ws_out.cell(row=row_idx + 1, column=3, value=line_lower)
                     ws_out.cell(row=row_idx + 1, column=4, value="")
 
-                    # Style các ô
                     for r in [row_idx, row_idx + 1]:
                         for c in range(1, 5):
                             cell = ws_out.cell(row=r, column=c)
                             cell.border = thin_border
                             if c == 3 and r == row_idx + 1:
                                 cell.font = Font(
-                                    name="Arial", size=10, bold=True, color="0066CC"
-                                >
+                                    name="Arial",
+                                    size=10,
+                                    bold=True,
+                                    color="0066CC",
+                                )
                             else:
                                 cell.font = Font(name="Arial", size=10)
 
                     row_idx += 2
 
-                # Tự động điều chỉnh độ rộng cột cho đẹp
                 for col in ws_out.columns:
                     max_len = max(len(str(cell.value or "")) for cell in col)
                     col_letter = get_column_letter(col[0].column)
@@ -297,7 +293,6 @@ if uploaded_file is not None:
                         max_len + 4, 15
                     )
 
-                # Lưu vào bộ nhớ đệm
                 output_excel = io.BytesIO()
                 wb_out.save(output_excel)
                 output_excel.seek(0)
@@ -307,7 +302,6 @@ if uploaded_file is not None:
                     " công!"
                 )
 
-                # Nút download file Excel
                 st.download_button(
                     label="📥 Tải xuống file Excel kết quả dịch hình ảnh",
                     data=output_excel,
