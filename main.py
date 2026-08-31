@@ -190,7 +190,7 @@ if uploaded_file is not None:
         last_y = data_rows[0]["y"]
 
         for item in data_rows[1:]:
-          if abs(item["y"] - last_y) < 18:  cùng dòng
+         if abs(item["y"] - last_y) < 18:  # cùng dòng
             row_group.append(item)
           else:
             # Sắp xếp các ô trong dòng theo thứ tự từ trái qua phải (tọa độ x)
