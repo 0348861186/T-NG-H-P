@@ -126,7 +126,7 @@ if uploaded_file is not None:
 
         with st.spinner("Đang nhận diện chữ trong ảnh (OCR)..."):
             import easyocr
-            reader = easyocr.Reader(['ch_sim', 'en', 'vi'], gpu=False)
+            reader = easyocr.Reader(['ch_sim', 'en'], gpu=False)
             img_np = np.array(image)
             results = reader.readtext(img_np)
 
