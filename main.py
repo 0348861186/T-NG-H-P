@@ -28,8 +28,8 @@ def translate_text(text, src_lang, dest_lang):
         return text
 
 # Giao diện ứng dụng
-st.title("🧮 Ứng dụng dịch song ngữ Trung - Việt cho File Excel & Ảnh")
-st.markdown("Hỗ trợ tải lên file Excel hoặc Ảnh chứa bảng, dịch tự động và xuất ra file Excel giữ nguyên định dạng.")
+st.title("🧮 Ứng dụng dịch song ngữ Trung - Việt chuyên nghiệp (Excel & Ảnh)")
+st.markdown("Hỗ trợ dịch song ngữ chuẩn xác, giữ nguyên hoặc tạo chuẩn định dạng bảng biểu giống hệt file mẫu.")
 
 # Sidebar cấu hình
 st.sidebar.header("Cấu hình dịch")
@@ -117,15 +117,16 @@ if uploaded_file is not None:
 
     # ================= TRƯỜNG HỢP 2: XỬ LÝ FILE ẢNH =================
     elif file_extension in ["png", "jpg", "jpeg"]:
-        st.info("Đang xử lý ảnh (Sử dụng OCR để bóc tách văn bản và tạo bảng Excel)...")
+        st.info("Đang xử lý ảnh và tái tạo định dạng bảng chuẩn theo mẫu...")
 
         image_bytes = uploaded_file.read()
         image = Image.open(io.BytesIO(image_bytes))
 
         st.image(image, caption="Ảnh gốc tải lên", use_container_width=True)
 
-        with st.spinner("Đang nhận diện chữ trong ảnh (OCR)..."):
+        with st.spinner("Đang nhận diện chữ và định dạng bảng..."):
             import easyocr
+            # Chỉ định ngôn ngữ 'ch_sim' và 'en' để OCR hoạt động ổn định nhất
             reader = easyocr.Reader(['ch_sim', 'en'], gpu=False)
             img_np = np.array(image)
             results = reader.readtext(img_np)
@@ -159,12 +160,20 @@ if uploaded_file is not None:
                     row_group = sorted(row_group, key=lambda k: k["x"])
                     table_matrix.append([i["text"] for i in row_group])
 
+            # Tạo file Excel mới với chuẩn định dạng giống hệt ảnh mẫu (Việt - Trung song ngữ)
             wb = openpyxl.Workbook()
             ws = wb.active
             ws.title = "Sheet1"
 
-            orange_fill = PatternFill(start_color="ED7D31", end_color="ED7D31", fill_type="solid")
-            white_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+            # Thiết lập style chuẩn chuyên nghiệp theo ảnh yêu cầu
+            orange_header_fill = PatternFill(start_color="ED7D31", end_color="ED7D31", fill_type="solid")
+            orange_title_fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
+            
+            header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+            title_font = Font(name="Calibri", size=12, bold=True, color="000000")
+            original_font = Font(name="Calibri", size=11, bold=False, color="000000")
+            translated_font = Font(name="Calibri", size=10, italic=True, color="333333")
+
             thin_border = Border(
                 left=Side(style='thin', color='000000'),
                 right=Side(style='thin', color='000000'),
@@ -172,38 +181,69 @@ if uploaded_file is not None:
                 bottom=Side(style='thin', color='000000')
             )
 
-            for r_idx, r_data in enumerate(table_matrix, start=1):
-                translated_row = []
-                for c_idx, cell_text in enumerate(r_data, start=1):
-                    cell = ws.cell(row=r_idx * 2 - 1, column=c_idx, value=cell_text)
-                    cell.border = thin_border
-                    cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-                    if r_idx == 1:
-                        cell.fill = orange_fill
-                        cell.font = white_font
+            current_excel_row = 1
+            for r_idx, r_data in enumerate(table_matrix):
+                # Kiểm tra xem đây có phải là dòng tiêu đề chung (ví dụ dòng chứa ngày tháng) hay không
+                is_main_title = (len(r_data) == 1 and ("2026" in r_data[0] or "年" in r_data[0] or "月" in r_data[0]))
+                
+                if is_main_title:
+                    # Dòng tiêu đề chính phía trên
+                    cell = ws.cell(row=current_excel_row, column=1, value=r_data[0])
+                    cell.font = title_font
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
+                    
+                    # Dịch dòng tiêu đề chính xuống dưới (song ngữ tiêu đề)
+                    trans_title = translate_text(r_data[0], src, dest)
+                    cell_trans = ws.cell(row=current_excel_row + 1, column=1, value=trans_title)
+                    cell_trans.font = Font(name="Calibri", size=11, italic=True, color="555555")
+                    cell_trans.alignment = Alignment(horizontal='center', vertical='center')
+                    
+                    current_excel_row += 2
+                else:
+                    # Xử lý các dòng dữ liệu bảng / tiêu đề cột bảng
+                    translated_row = []
+                    for c_idx, cell_text in enumerate(r_data, start=1):
+                        cell = ws.cell(row=current_excel_row, column=c_idx, value=cell_text)
+                        cell.border = thin_border
+                        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+                        cell.font = original_font
+                        
+                        # Nếu là dòng đầu tiên của bảng (Header cột như STT, 部分, 开几台机...) -> Tô màu cam
+                        if r_idx == 1 or (r_idx <= 2 and any("STT" in str(x) or "部分" in str(x) for x in r_data)):
+                            cell.fill = orange_header_fill
+                            cell.font = header_font
 
-                    trans_text = translate_text(cell_text, src, dest)
-                    translated_row.append(trans_text)
+                        trans_text = translate_text(cell_text, src, dest)
+                        translated_row.append(trans_text)
 
-                for c_idx, trans_text in enumerate(translated_row, start=1):
-                    cell_trans = ws.cell(row=r_idx * 2, column=c_idx, value=trans_text)
-                    cell_trans.border = thin_border
-                    cell_trans.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-                    cell_trans.font = Font(name="Calibri", size=10, italic=True, color="333333")
+                    # Dòng dịch song ngữ ngay bên dưới
+                    current_excel_row += 1
+                    for c_idx, trans_text in enumerate(translated_row, start=1):
+                        cell_trans = ws.cell(row=current_excel_row, column=c_idx, value=trans_text)
+                        cell_trans.border = thin_border
+                        cell_trans.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+                        cell_trans.font = translated_font
+                        
+                        # Nếu là dòng header cột thì dòng dịch bên dưới cũng tô nền cam nhạt hoặc giữ nguyên viền
+                        if r_idx == 1 or (r_idx <= 2 and any("STT" in str(x) or "部分" in str(x) for x in r_data)):
+                            cell_trans.fill = orange_header_fill
+                            cell_trans.font = Font(name="Calibri", size=10, bold=True, italic=True, color="FFFFFF")
+
+                    current_excel_row += 1
 
             output = io.BytesIO()
             wb.save(output)
             output.seek(0)
 
-            st.success("Đã trích xuất và dịch bảng từ ảnh thành công!")
+            st.success("Đã trích xuất và tạo file Excel chuẩn định dạng song ngữ giống ảnh mẫu thành công!")
             
-            st.write("### Bảng dữ liệu trích xuất & dịch xem trước:")
+            st.write("### Xem trước dữ liệu bóc tách:")
             df_preview = pd.DataFrame(table_matrix)
             st.dataframe(df_preview)
 
             st.download_button(
-                label="📥 Tải xuống file Excel kết quả",
+                label="📥 Tải xuống file Excel chuẩn định dạng",
                 data=output,
-                file_name="translated_from_image.xlsx",
+                file_name="translated_table_standard.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
