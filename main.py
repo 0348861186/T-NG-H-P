@@ -1,9 +1,7 @@
 from pathlib import Path
 
-# Đổi từ "/mnt/data/chung_viet_translator" thành thư mục hiện tại
+# Sử dụng thư mục hiện tại thay vì /mnt/data
 project = Path(".")
-project.mkdir(exist_ok=True)
-project = Path("/mnt/data/chung_viet_translator")
 project.mkdir(exist_ok=True)
 
 app_code = r'''import io
