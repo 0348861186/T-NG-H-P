@@ -1,4 +1,4 @@
-code = r'''import io
+import io
 import os
 import re
 import copy
@@ -33,8 +33,7 @@ SUPPORTED_EXCEL_TYPES = ["xlsx", "xlsm"]
 @st.cache_resource
 def load_ocr_reader():
     # EasyOCR không cần "vi" để nhận diện mọi trường hợp; giữ ch/en để
-    # nhận diện Trung + Latin tốt hơn. Nếu môi trường EasyOCR hỗ trợ vi,
-    # có thể thêm "vi".
+    # nhận diện Trung + Latin tốt hơn.
     return easyocr.Reader(["ch_sim", "en"], gpu=False)
 
 
@@ -48,7 +47,7 @@ def cached_translate(text: str, direction: str) -> str:
         return ""
 
     # Không dịch các ô chỉ chứa số / ký hiệu.
-    if re.fullmatch(r"[\d\s.,%+\-*/=()（）【】\[\]{}:;，。！？!?_/\\]+", text):
+    if re.fullmatch(r"[\d\s.,%+\-*/=()（）【\]{}:;，。！？!?_/\\]+", text):
         return text
 
     source, target = (
@@ -59,7 +58,6 @@ def cached_translate(text: str, direction: str) -> str:
     try:
         return GoogleTranslator(source=source, target=target).translate(text) or ""
     except Exception as exc:
-        # Không phá file vì lỗi dịch; giữ nội dung gốc và ghi cảnh báo.
         return f"[LỖI DỊCH: {exc}]"
 
 
@@ -84,19 +82,10 @@ def contains_translatable_text(value):
         return False
     if is_formula(text):
         return False
-    # Không dịch ô chỉ có số/ký hiệu.
-    return not bool(re.fullmatch(r"[\d\s.,%+\-*/=()（）【】\[\]{}:;，。！？!?_/\\]+", text))
+    return not bool(re.fullmatch(r"[\d\s.,%+\-*/=()（）【\]{}:;，。！？!?_/\\]+", text))
 
 
 def make_bilingual(original, translated, direction):
-    """
-    Bất kể chiều dịch:
-        Trung
-        Việt
-
-    Nếu Trung -> Việt: original là Trung.
-    Nếu Việt -> Trung: translated là Trung.
-    """
     if direction == "Trung - Việt":
         chinese = str(original)
         vietnamese = str(translated)
@@ -107,39 +96,19 @@ def make_bilingual(original, translated, direction):
     return f"{chinese}\n{vietnamese}"
 
 
-def get_line_count(text):
-    if text is None:
-        return 1
-    return max(1, str(text).count("\n") + 1)
-
-
 def adjust_row_height(ws, row_idx, original_height, extra_lines=1):
-    """
-    Tăng chiều cao dòng một cách an toàn khi cell chuyển thành 2 dòng.
-    Không thay đổi nếu người dùng đang dùng chiều cao tự động/không đặt.
-    """
     if original_height is None:
-        # Excel thường tự điều chỉnh khi mở file nếu wrap_text=True.
         return
 
     base = float(original_height)
-    # Với 2 dòng, khoảng 1.9 lần thường đủ để không cắt chữ.
     factor = max(1.0, 1.0 + 0.9 * extra_lines)
     new_height = max(base, base * factor)
-
-    # Giới hạn để tránh row khổng lồ.
     ws.row_dimensions[row_idx].height = min(new_height, 409.0)
 
 
 def load_excel_preserving_features(file_obj, extension):
-    """
-    Mở trực tiếp workbook gốc thay vì tạo workbook mới.
-    Điều này giúp giữ tối đa các thành phần Excel mà openpyxl hỗ trợ.
-    """
     file_obj.seek(0)
-
     keep_vba = extension.lower() == "xlsm"
-
     return openpyxl.load_workbook(
         file_obj,
         read_only=False,
@@ -163,13 +132,11 @@ def process_excel(file_obj, direction):
     warnings = []
 
     for ws in wb.worksheets:
-        # Lưu chiều cao dòng ban đầu.
         original_row_heights = {
             idx: ws.row_dimensions[idx].height
             for idx in range(1, ws.max_row + 1)
         }
 
-        # Xử lý snapshot ô trước khi sửa, tránh ảnh hưởng khi merged cell.
         for row in ws.iter_rows():
             for cell in row:
                 if isinstance(cell, MergedCell):
@@ -189,34 +156,25 @@ def process_excel(file_obj, direction):
                         skipped_count += 1
                         continue
 
-                    # Nếu translator trả lỗi, không thay nội dung để tránh
-                    # làm hỏng file.
                     if str(translated).startswith("[LỖI DỊCH:"):
                         warnings.append(
                             f"{ws.title}!{cell.coordinate}: {translated}"
                         )
                         continue
 
-                    # Nếu đã là song ngữ do chạy lại app, không dịch lại.
                     if "\n" in original:
                         lines = original.splitlines()
                         if len(lines) >= 2:
-                            # Trong cả hai chiều, dòng 1 phải là Trung.
-                            # Không cố đoán lại nếu file đã song ngữ.
                             skipped_count += 1
                             continue
 
                     cell.value = make_bilingual(original, translated, direction)
 
-                    # Chỉ chỉnh wrap_text, giữ lại toàn bộ thuộc tính alignment còn lại.
                     old_alignment = copy.copy(cell.alignment)
                     old_alignment.wrap_text = True
                     cell.alignment = old_alignment
 
-                    # Không thay font/fill/border/number_format:
-                    # cell vẫn là cell gốc của workbook.
                     row_height = original_row_heights.get(cell.row)
-
                     if row_height is not None:
                         adjust_row_height(
                             ws,
@@ -235,7 +193,6 @@ def process_excel(file_obj, direction):
     output = io.BytesIO()
     output_format = "xlsm" if extension == "xlsm" else "xlsx"
 
-    # Giữ VBA khi file nguồn là XLSM.
     wb.save(output)
     output.seek(0)
 
@@ -247,22 +204,17 @@ def process_excel(file_obj, direction):
 # ============================================================
 def find_font():
     candidates = [
-        # Windows
         r"C:\Windows\Fonts\msyh.ttc",
         r"C:\Windows\Fonts\msyh.ttf",
         r"C:\Windows\Fonts\simhei.ttf",
         r"C:\Windows\Fonts\simsun.ttc",
         r"C:\Windows\Fonts\arialuni.ttf",
         r"C:\Windows\Fonts\arial.ttf",
-
-        # Linux
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.otf",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.otf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-
-        # macOS
         "/System/Library/Fonts/PingFang.ttc",
         "/System/Library/Fonts/Hiragino Sans GB.ttc",
         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
@@ -297,11 +249,6 @@ def bbox_to_rect(bbox):
 
 
 def group_ocr_lines(results, y_tolerance_ratio=0.55):
-    """
-    Gom các box OCR nằm trên cùng một dòng.
-    Trả về danh sách dòng, mỗi dòng gồm:
-        text, x1, y1, x2, y2
-    """
     items = []
 
     for bbox, text, prob in results:
@@ -345,7 +292,6 @@ def group_ocr_lines(results, y_tolerance_ratio=0.55):
 
     for line in lines:
         line.sort(key=lambda x: x["x1"])
-
         text = " ".join(i["text"] for i in line)
 
         output.append({
@@ -383,10 +329,6 @@ def fit_font_to_width(draw, text, font_path, initial_size, max_width):
 
 
 def choose_background_color(image, box, sample_padding=3):
-    """
-    Lấy màu trung bình quanh vùng bên dưới OCR để tạo nền cho bản dịch.
-    Không sửa vùng chữ gốc.
-    """
     x1, y1, x2, y2 = box
 
     crop = image.crop((
@@ -419,13 +361,6 @@ def draw_translation_below(
     font_path,
     direction,
 ):
-    """
-    Chỉ vẽ phần bổ sung phía dưới dòng OCR.
-    Không vẽ lại chữ gốc.
-
-    Nếu phía dưới không đủ chỗ:
-    - mở rộng canvas theo chiều dọc.
-    """
     draw = ImageDraw.Draw(base_image)
 
     x1, y1, x2, y2 = (
@@ -436,11 +371,7 @@ def draw_translation_below(
     )
 
     original_h = max(10, y2 - y1)
-
-    # Font dịch gần tương đương font gốc nhưng nhỏ hơn một chút.
     font_size = max(12, int(original_h * 0.72))
-
-    # Không để bản dịch dài quá vùng OCR quá nhiều.
     max_width = max(80, min(base_image.width - x1 - 5, max(120, x2 - x1) * 1.35))
 
     font = fit_font_to_width(
@@ -457,7 +388,6 @@ def draw_translation_below(
     top = y2 + gap
     bottom = top + text_h + gap
 
-    # Mở rộng ảnh nếu cần để bản dịch không bị cắt.
     if bottom > base_image.height:
         extra = bottom - base_image.height + gap
         expanded = Image.new(
@@ -469,14 +399,12 @@ def draw_translation_below(
         base_image = expanded
         draw = ImageDraw.Draw(base_image)
 
-    # Nền nhỏ ngay phía sau bản dịch để dễ đọc, nhưng không che chữ gốc.
     bg = choose_background_color(base_image, (x1, y1, x2, y2))
     text_color = contrast_text_color(bg)
 
     pad_x = 3
     pad_y = 1
 
-    # Chỉ tạo nền trong vùng bản dịch.
     bbox = draw.textbbox(
         (x1, top),
         translated,
@@ -510,11 +438,8 @@ def process_image(image_file, direction):
 
     image_file.seek(0)
     original = Image.open(image_file)
-
-    # Giữ RGB/RGBA thành RGB để output ổn định.
     image = original.convert("RGB")
 
-    # OCR trên ảnh gốc, không resize để giữ tọa độ thực.
     img_np = np.array(image)
     results = reader.readtext(img_np)
 
@@ -528,7 +453,6 @@ def process_image(image_file, direction):
             "Không nhận diện được chữ trong ảnh. Hãy thử ảnh có độ phân giải cao hơn."
         ]
 
-    # Xử lý từ trên xuống dưới.
     translated_count = 0
     warnings = []
 
@@ -550,8 +474,6 @@ def process_image(image_file, direction):
                 )
                 continue
 
-            # Đảm bảo tiếng Việt nằm dưới tiếng Trung:
-            # trên ảnh gốc đã có dòng gốc. Chỉ vẽ phần còn thiếu.
             vietnamese = (
                 translated if direction == "Trung - Việt"
                 else original_text
@@ -561,10 +483,6 @@ def process_image(image_file, direction):
                 else translated
             )
 
-            # Dòng gốc trong ảnh phải là tiếng Trung ở phía trên.
-            # Với Việt -> Trung, bản gốc Việt đang ở trên ảnh.
-            # Để đáp ứng yêu cầu, ta phải che dòng Việt cũ rồi vẽ Trung
-            # ở trên và Việt ở dưới. Cách an toàn nhất là redraw vùng OCR.
             if direction == "Việt - Trung":
                 x1, y1, x2, y2 = (
                     line["x1"], line["y1"], line["x2"], line["y2"]
@@ -572,7 +490,6 @@ def process_image(image_file, direction):
 
                 pad = max(4, int(line["height"] * 0.25))
 
-                # Lấy màu nền từ vùng quanh box.
                 bg = choose_background_color(
                     output,
                     (x1, y1, x2, y2),
@@ -590,7 +507,6 @@ def process_image(image_file, direction):
                     fill=bg,
                 )
 
-                # Vẽ tiếng Trung tại vị trí chữ gốc.
                 font = fit_font_to_width(
                     draw,
                     chinese,
@@ -606,7 +522,6 @@ def process_image(image_file, direction):
                     fill=contrast_text_color(bg),
                 )
 
-                # Sau đó vẽ tiếng Việt bên dưới.
                 output = draw_translation_below(
                     output,
                     {
@@ -754,11 +669,8 @@ if extension in SUPPORTED_EXCEL_TYPES:
                 )
 
             except Exception as exc:
-                st.error(
-                    "❌ Không thể xử lý Excel."
-                )
+                st.error("❌ Không thể xử lý Excel.")
                 st.exception(exc)
-
 
 # ============================================================
 # IMAGE
@@ -776,9 +688,7 @@ elif extension in SUPPORTED_IMAGE_TYPES:
     )
 
     if start_image:
-        with st.spinner(
-            "Đang OCR và dịch hình ảnh..."
-        ):
+        with st.spinner("Đang OCR và dịch hình ảnh..."):
             try:
                 result_img, translated_count, warnings = process_image(
                     uploaded_file,
@@ -824,31 +734,7 @@ elif extension in SUPPORTED_IMAGE_TYPES:
                 )
 
             except Exception as exc:
-                st.error(
-                    "❌ Không thể xử lý hình ảnh."
-                )
+                st.error("❌ Không thể xử lý hình ảnh.")
                 st.exception(exc)
 else:
-    st.error(
-        "Định dạng file chưa được hỗ trợ."
-    )
-'''
-path = "/mnt/data/app_dich_song_ngu.py"
-with open(path, "w", encoding="utf-8") as f:
-    f.write(code)
-
-req = """streamlit
-openpyxl
-pillow
-numpy
-pandas
-deep-translator
-easyocr
-torch
-torchvision
-"""
-with open("/mnt/data/requirements.txt", "w", encoding="utf-8") as f:
-    f.write(req)
-
-print(path)
-print("/mnt/data/requirements.txt")
+    st.error("Định dạng file chưa được hỗ trợ.")
