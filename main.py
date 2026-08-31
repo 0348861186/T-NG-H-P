@@ -15,10 +15,9 @@ st.set_page_config(
 )
 
 
-# Khởi tạo EasyOCR (Fix lỗi xung đột ngôn ngữ bằng cách tách riêng hoặc dùng chung chuẩn của EasyOCR)
+# Khởi tạo EasyOCR tách riêng reader để tránh lỗi ngôn ngữ của thư viện
 @st.cache_resource
 def load_ocr_readers():
-    # EasyOCR yêu cầu tiếng Trung chỉ đi kèm với tiếng Anh, do đó ta khởi tạo 2 reader riêng biệt để quét linh hoạt cả Trung lẫn Việt
     reader_zh = easyocr.Reader(["ch_sim", "en"], gpu=False)
     reader_vi = easyocr.Reader(["vi", "en"], gpu=False)
     return reader_zh, reader_vi
@@ -177,10 +176,9 @@ def process_image(image_file, direction):
     image = Image.open(image_file).convert("RGB")
     img_np = np.array(image)
 
-    # Dùng cả 2 reader để quét chữ chính xác cho cả tiếng Trung và tiếng Việt
     results_zh = reader_zh.readtext(img_np)
     results_vi = reader_vi.readtext(img_np)
-    results = results_zh + results_vi  # Gộp kết quả nhận diện
+    results = results_zh + results_vi
 
     draw_image = image.copy()
     draw = ImageDraw.Draw(draw_image)
@@ -280,10 +278,11 @@ if uploaded_file is not None:
                     result_img = process_image(uploaded_file, direction)
                     st.success("✨ Dịch hình ảnh hoàn tất!")
 
+                    # Đã thay use_column_width thành use_container_width
                     st.image(
                         result_img,
                         caption="Ảnh sau khi dịch (Tiếng Việt nằm dưới Tiếng Trung)",
-                        use_column_width=True,
+                        use_container_width=True,
                     )
 
                     buf = io.BytesIO()
