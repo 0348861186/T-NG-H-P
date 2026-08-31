@@ -953,4 +953,174 @@ if uploaded_file is not None:
 
 **Cách 2 – Cấu hình trên Streamlit Cloud (Secrets):**
 ```toml
-GEMINI_API_KEY = "AIza..."
+GEMINI_API_KEY = "AIza...""""
+)
+        st.stop()
+    # ========================================================
+    # EXCEL
+    # ========================================================
+    if extension in EXCEL_EXTENSIONS:
+        st.subheader("📊 Xử lý Excel")
+
+        keep_vba = True if extension == "xlsm" else False
+
+        process_button = st.button(
+            "🚀 BẮT ĐẦU DỊCH EXCEL",
+            type="primary",
+            use_container_width=True,
+        )
+
+        if process_button:
+            try:
+                file_bytes = uploaded_file.getvalue()
+                input_stream = io.BytesIO(file_bytes)
+
+                wb = load_workbook(
+                    input_stream,
+                    data_only=False,
+                    keep_vba=keep_vba,
+                )
+
+                st.write(f"📑 Số sheet: **{len(wb.sheetnames)}**")
+                for name in wb.sheetnames:
+                    st.write(f"• {name}")
+
+                structure_snapshot = snapshot_workbook_structure(wb)
+                original_items = collect_excel_translation_items(wb)
+                total_items = len(original_items)
+
+                st.write(f"🔤 Số ô text cần dịch: **{total_items}**")
+
+                if total_items == 0:
+                    st.warning("Không tìm thấy nội dung văn bản cần dịch.")
+                    st.stop()
+
+                progress = st.progress(0)
+                status = st.empty()
+                status.info("🤖 Đang gửi nội dung cho Gemini...")
+
+                def update_progress(value):
+                    progress.progress(value)
+
+                translation_map, used_model, translated_count = translate_excel_texts(
+                    wb, progress_callback=update_progress
+                )
+
+                status.success(f"✅ Gemini hoàn tất: {translated_count} mục.")
+                status.info("🛠️ Đang xây dựng lại Excel...")
+
+                wb = apply_translations_to_excel(
+                    wb=wb,
+                    translation_map=translation_map,
+                    original_items=original_items,
+                )
+
+                status.info("💾 Đang tạo file Excel...")
+                output = io.BytesIO()
+                wb.save(output)
+                output.seek(0)
+
+                progress.progress(1.0)
+                status.success("🎉 Hoàn tất!")
+                st.success(f"Đã dịch bằng **{used_model}**.")
+
+                st.download_button(
+                    label="📥 DOWNLOAD EXCEL SONG NGỮ",
+                    data=output.getvalue(),
+                    file_name=f"dich_song_ngu_{Path(uploaded_file.name).stem}.{extension}",
+                    mime=(
+                        "application/vnd.ms-excel.sheet.macroEnabled.12"
+                        if extension == "xlsm"
+                        else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    ),
+                    use_container_width=True,
+                    type="primary",
+                )
+
+                st.markdown("---")
+                st.subheader("ℹ️ Thông tin xử lý")
+
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Sheets", len(wb.sheetnames))
+                with col2:
+                    st.metric("Ô đã dịch", translated_count)
+                with col3:
+                    st.metric("Model", used_model)
+
+                st.caption(
+                    "Lưu ý: Excel phức tạp có VBA, PivotTable, SmartArt, slicer hoặc "
+                    "drawing đặc biệt có thể cần kiểm tra lại bằng Excel sau khi xuất."
+                )
+
+            except Exception as e:
+                st.error("❌ Xử lý Excel thất bại.")
+                st.exception(e)
+
+    # ========================================================
+    # IMAGE
+    # ========================================================
+    elif extension in IMAGE_EXTENSIONS:
+        st.subheader("🖼️ OCR + Dịch hình ảnh bằng Gemini")
+
+        image_bytes = uploaded_file.getvalue()
+        mime_type = {
+            "png": "image/png",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+        }[extension]
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("### Ảnh gốc")
+            st.image(image_bytes, use_container_width=True)
+
+        process_image_button = st.button(
+            "🚀 OCR + DỊCH HÌNH ẢNH",
+            type="primary",
+            use_container_width=True,
+        )
+
+        if process_image_button:
+            try:
+                progress = st.progress(0)
+                status = st.empty()
+                status.info("👁️ Gemini đang nhận dạng chữ...")
+                progress.progress(20)
+
+                translated_image, ocr_model, translation_model, ocr_count = process_image(
+                    image_bytes=image_bytes,
+                    mime_type=mime_type,
+                )
+
+                progress.progress(100)
+                status.success("🎉 OCR + dịch hoàn tất!")
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown("### Ảnh gốc")
+                    st.image(image_bytes, use_container_width=True)
+                with col2:
+                    st.markdown("### Ảnh song ngữ")
+                    st.image(translated_image, use_container_width=True)
+
+                st.success(
+                    f"OCR: **{ocr_model}** | "
+                    f"Dịch: **{translation_model}** | "
+                    f"Vùng text: **{ocr_count}**"
+                )
+
+                output_name = f"dich_song_ngu_{Path(uploaded_file.name).stem}.png"
+
+                st.download_button(
+                    label="📥 DOWNLOAD ẢNH SONG NGỮ",
+                    data=translated_image,
+                    file_name=output_name,
+                    mime="image/png",
+                    use_container_width=True,
+                    type="primary",
+                )
+
+            except Exception as e:
+                st.error("❌ OCR/Dịch hình ảnh thất bại.")
+                st.exception(e)
