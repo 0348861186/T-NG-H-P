@@ -878,3 +878,6 @@ readme = """# Trung ↔ Việt Excel & Image Translator
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
+```"""  # <-- Đã thêm dấu đóng 3 nháy kép vào đây
+
+(project / "README.md").write_text(readme, encoding="utf-8")
