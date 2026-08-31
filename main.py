@@ -1291,204 +1291,204 @@ Họ tên nhân viên
 """
             )
 
-    if st.button(
-        "🚀 OCR + DỊCH + XUẤT EXCEL",
-        type="primary",
-        use_container_width=True,
-    ):
-        if not api_key:
-            st.error(
-                "Chưa có GEMINI_API_KEY. "
-                "Hãy nhập API key ở sidebar "
-                "hoặc thêm vào Streamlit Secrets."
-            )
-            st.stop()
-
-        try:
-            client = get_client(api_key)
-
-            progress = st.progress(0)
-
-            with st.spinner(
-                "Gemini đang OCR, nhận dạng bảng và dịch..."
-            ):
-                (
-                    output_bytes,
-                    table,
-                ) = build_excel_from_image(
-                    image_bytes,
-                    uploaded.name,
-                    client,
-                    model,
-                    source_lang,
-                    target_lang,
-                    mode,
-                    progress=progress.progress,
+        if st.button(
+            "🚀 OCR + DỊCH + XUẤT EXCEL",
+            type="primary",
+            use_container_width=True,
+        ):
+            if not api_key:
+                st.error(
+                    "Chưa có GEMINI_API_KEY. "
+                    "Hãy nhập API key ở sidebar "
+                    "hoặc thêm vào Streamlit Secrets."
                 )
+                st.stop()
 
-            row_count, col_count = (
-                validate_image_table(table)
-            )
+            try:
+                client = get_client(api_key)
 
-            st.success(
-                f"Hoàn tất. Nhận dạng khoảng "
-                f"{row_count} hàng × {col_count} cột, "
-                f"{len(table.cells)} vùng ô."
-            )
+                progress = st.progress(0)
 
-            st.subheader(
-                "🔎 Dữ liệu OCR"
-            )
-
-            preview = [
-                [
-                    ""
-                    for _ in range(col_count)
-                ]
-                for _ in range(row_count)
-            ]
-
-            for cell in normalize_image_cells(table):
-                if (
-                    cell.row < row_count
-                    and cell.col < col_count
+                with st.spinner(
+                    "Gemini đang OCR, nhận dạng bảng và dịch..."
                 ):
-                    preview[
-                        cell.row
-                    ][
-                        cell.col
-                    ] = cell.value
+                    (
+                        output_bytes,
+                        table,
+                    ) = build_excel_from_image(
+                        image_bytes,
+                        uploaded.name,
+                        client,
+                        model,
+                        source_lang,
+                        target_lang,
+                        mode,
+                        progress=progress.progress,
+                    )
 
-            st.dataframe(
-                preview,
-                use_container_width=True,
-                hide_index=True,
-            )
-
-            out_name = (
-                Path(uploaded.name).stem
-                + "_"
-                + (
-                    "song_ngu"
-                    if mode == "bilingual"
-                    else "da_dich"
+                row_count, col_count = (
+                    validate_image_table(table)
                 )
-                + ".xlsx"
-            )
 
-            st.download_button(
-                "⬇️ TẢI FILE EXCEL",
-                data=output_bytes,
-                file_name=out_name,
-                mime=(
-                    "application/vnd.openxmlformats-officedocument."
-                    "spreadsheetml.sheet"
-                ),
-                type="primary",
-                use_container_width=True,
-            )
+                st.success(
+                    f"Hoàn tất. Nhận dạng khoảng "
+                    f"{row_count} hàng × {col_count} cột, "
+                    f"{len(table.cells)} vùng ô."
+                )
 
-        except Exception as exc:
-            st.error(
-                f"Lỗi xử lý ảnh: {exc}"
-            )
-            st.exception(exc)
+                st.subheader(
+                    "🔎 Dữ liệu OCR"
+                )
 
-elif file_type == "excel":
-    st.subheader("📊 Excel nguồn")
+                preview = [
+                    [
+                        ""
+                        for _ in range(col_count)
+                    ]
+                    for _ in range(row_count)
+                ]
 
-    excel_bytes = uploaded.getvalue()
+                for cell in normalize_image_cells(table):
+                    if (
+                        cell.row < row_count
+                        and cell.col < col_count
+                    ):
+                        preview[
+                            cell.row
+                        ][
+                            cell.col
+                        ] = cell.value
 
-    st.info(
-        "Chương trình sửa trực tiếp trên bản sao workbook: "
-        "giữ tối đa cấu trúc và định dạng Excel gốc; "
-        "chỉ thay nội dung chữ bằng bản dịch."
-    )
+                st.dataframe(
+                    preview,
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
-    if uploaded.name.lower().endswith(".xlsm"):
-        st.warning(
-            "Đây là XLSM. Chương trình dùng keep_vba=True "
-            "để cố gắng bảo toàn VBA. Hãy kiểm tra macro sau khi xuất."
+                out_name = (
+                    Path(uploaded.name).stem
+                    + "_"
+                    + (
+                        "song_ngu"
+                        if mode == "bilingual"
+                        else "da_dich"
+                    )
+                    + ".xlsx"
+                )
+
+                st.download_button(
+                    "⬇️ TẢI FILE EXCEL",
+                    data=output_bytes,
+                    file_name=out_name,
+                    mime=(
+                        "application/vnd.openxmlformats-officedocument."
+                        "spreadsheetml.sheet"
+                    ),
+                    type="primary",
+                    use_container_width=True,
+                )
+
+            except Exception as exc:
+                st.error(
+                    f"Lỗi xử lý ảnh: {exc}"
+                )
+                st.exception(exc)
+
+    elif file_type == "excel":
+        st.subheader("📊 Excel nguồn")
+
+        excel_bytes = uploaded.getvalue()
+
+        st.info(
+            "Chương trình sửa trực tiếp trên bản sao workbook: "
+            "giữ tối đa cấu trúc và định dạng Excel gốc; "
+            "chỉ thay nội dung chữ bằng bản dịch."
         )
 
-    if st.button(
-        "🚀 DỊCH EXCEL + GIỮ ĐỊNH DẠNG",
-        type="primary",
-        use_container_width=True,
-    ):
-        if not api_key:
-            st.error(
-                "Chưa có GEMINI_API_KEY. "
-                "Hãy nhập API key ở sidebar "
-                "hoặc thêm vào Streamlit Secrets."
+        if uploaded.name.lower().endswith(".xlsm"):
+            st.warning(
+                "Đây là XLSM. Chương trình dùng keep_vba=True "
+                "để cố gắng bảo toàn VBA. Hãy kiểm tra macro sau khi xuất."
             )
-            st.stop()
 
-        try:
-            client = get_client(api_key)
+        if st.button(
+            "🚀 DỊCH EXCEL + GIỮ ĐỊNH DẠNG",
+            type="primary",
+            use_container_width=True,
+        ):
+            if not api_key:
+                st.error(
+                    "Chưa có GEMINI_API_KEY. "
+                    "Hãy nhập API key ở sidebar "
+                    "hoặc thêm vào Streamlit Secrets."
+                )
+                st.stop()
 
-            progress = st.progress(0)
+            try:
+                client = get_client(api_key)
 
-            with st.spinner(
-                "Đang đọc Excel và dịch..."
-            ):
-                output_bytes = translate_excel(
-                    excel_bytes,
-                    uploaded.name,
-                    client,
-                    model,
-                    source_lang,
-                    target_lang,
-                    mode,
-                    progress=progress.progress,
+                progress = st.progress(0)
+
+                with st.spinner(
+                    "Đang đọc Excel và dịch..."
+                ):
+                    output_bytes = translate_excel(
+                        excel_bytes,
+                        uploaded.name,
+                        client,
+                        model,
+                        source_lang,
+                        target_lang,
+                        mode,
+                        progress=progress.progress,
+                    )
+
+                progress.progress(1.0)
+
+                st.success(
+                    "Dịch Excel hoàn tất."
                 )
 
-            progress.progress(1.0)
+                suffix = (
+                    "_song_ngu"
+                    if mode == "bilingual"
+                    else "_da_dich"
+                )
 
-            st.success(
-                "Dịch Excel hoàn tất."
-            )
+                original_ext = (
+                    ".xlsm"
+                    if uploaded.name.lower().endswith(".xlsm")
+                    else ".xlsx"
+                )
 
-            suffix = (
-                "_song_ngu"
-                if mode == "bilingual"
-                else "_da_dich"
-            )
+                out_name = (
+                    Path(uploaded.name).stem
+                    + suffix
+                    + original_ext
+                )
 
-            original_ext = (
-                ".xlsm"
-                if uploaded.name.lower().endswith(".xlsm")
-                else ".xlsx"
-            )
+                mime = (
+                    "application/vnd.ms-excel.sheet."
+                    "macroEnabled.12"
+                    if original_ext == ".xlsm"
+                    else
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                )
 
-            out_name = (
-                Path(uploaded.name).stem
-                + suffix
-                + original_ext
-            )
+                st.download_button(
+                    "⬇️ TẢI EXCEL SAU KHI DỊCH",
+                    data=output_bytes,
+                    file_name=out_name,
+                    mime=mime,
+                    type="primary",
+                    use_container_width=True,
+                )
 
-            mime = (
-                "application/vnd.ms-excel.sheet."
-                "macroEnabled.12"
-                if original_ext == ".xlsm"
-                else
-                "application/vnd.openxmlformats-officedocument."
-                "spreadsheetml.sheet"
-            )
-
-            st.download_button(
-                "⬇️ TẢI EXCEL SAU KHI DỊCH",
-                data=output_bytes,
-                file_name=out_name,
-                mime=mime,
-                type="primary",
-                use_container_width=True,
-            )
-
-        except Exception as exc:
-            st.error(
-                f"Lỗi xử lý Excel: {exc}"
-            )
-            st.exception(exc)
+            except Exception as exc:
+                st.error(
+                    f"Lỗi xử lý Excel: {exc}"
+                )
+                st.exception(exc)
 else:
     st.markdown("")
