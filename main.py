@@ -14,27 +14,18 @@ from openpyxl.utils import get_column_letter
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
+from google.genai.errors import APIError
 
 
 # ============================================================
-# TRUNG <-> VIỆT EXCEL / IMAGE TRANSLATOR - V2
+# TRUNG <-> VIỆT EXCEL / IMAGE TRANSLATOR - V2.1 (UPGRADED)
 #
-# Excel:
-#   - Sửa trực tiếp bản sao workbook
-#   - Giữ merge, style, border, màu, font, width, height,
-#     freeze panes và các thuộc tính sheet chính
-#   - XLSM: keep_vba=True
-#
-# Image:
-#   - Gemini Vision đọc bảng
-#   - Nhận dạng cells + rowspan + colspan
-#   - Dựng lại merge cells
-#   - OCR -> dịch -> Excel
-#   - Song ngữ: nguyên văn dòng trên + bản dịch dòng dưới
-#
-# Lưu ý:
-#   OpenPyXL không đảm bảo bảo toàn 100% mọi đối tượng Excel
-#   đặc biệt như một số drawing/chart/slicer/embedded object.
+# Cải tiến so với V2:
+#   1. Tự động tính toán chiều cao dòng (row height) thông minh 
+#      dựa trên số dòng thực tế và độ dài nội dung sau khi ghép song ngữ.
+#   2. Xử lý an toàn các kiểu dữ liệu đặc biệt (như datetime, float, int) 
+#      tránh làm mất format hiển thị gốc của Excel.
+#   3. Bắt và xử lý lỗi API cụ thể hơn (Rate limit / Quota / Network).
 # ============================================================
 
 APP_TITLE = "🇨🇳 ↔ 🇻🇳 Trung ↔ Việt Excel & Image Translator"
@@ -126,22 +117,23 @@ def contains_vietnamese(text):
 
 
 def is_translatable_text(value):
-    if value is None or not isinstance(value, str):
+    if value is None:
         return False
+    
+    # Cho phép các kiểu dữ liệu chuỗi cần dịch
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return False
+        if is_formula(text):
+            return False
+        # Chỉ có số / ký hiệu / dấu câu cơ bản -> không cần dịch
+        if re.fullmatch(r"[\d\s.,:/\\%+\-*=()]+", text):
+            return False
+        return True
 
-    text = value.strip()
-
-    if not text:
-        return False
-
-    if is_formula(text):
-        return False
-
-    # Chỉ có số / ký hiệu / dấu câu cơ bản.
-    if re.fullmatch(r"[\d\s.,:/\\%+\-*=()]+", text):
-        return False
-
-    return True
+    # Các kiểu số, datetime thuần túy trong Excel không cần dịch text
+    return False
 
 
 def already_bilingual(text, source_lang, target_lang):
@@ -174,10 +166,10 @@ def already_bilingual(text, source_lang, target_lang):
 
 def bilingual_text(original, translation):
     if not translation:
-        return original
+        return str(original)
 
     if not isinstance(original, str):
-        return translation
+        return str(translation)
 
     return f"{original}\n{translation}"
 
@@ -268,7 +260,7 @@ Danh sách cần dịch:
 
 def translate_batch(client, model, texts, source_lang, target_lang):
     """
-    Retry batch khi API lỗi hoặc response thiếu ID.
+    Retry batch khi API lỗi hoặc response thiếu ID, có bắt lỗi API chi tiết.
     """
     if not texts:
         return {}
@@ -298,14 +290,20 @@ def translate_batch(client, model, texts, source_lang, target_lang):
 
             return result
 
+        except APIError as api_exc:
+            last_error = api_exc
+            # Nếu gặp lỗi Rate Limit (429) hoặc Quota, chờ lâu hơn một chút
+            if api_exc.code == 429:
+                time.sleep(4 * attempt)
+            elif attempt < MAX_RETRIES:
+                time.sleep(2 ** (attempt - 1))
         except Exception as exc:
             last_error = exc
-
             if attempt < MAX_RETRIES:
                 time.sleep(2 ** (attempt - 1))
 
     raise RuntimeError(
-        f"Dịch batch thất bại sau {MAX_RETRIES} lần thử: {last_error}"
+        f"Dịch batch thất bại sau {MAX_RETRIES} lần thử. Chi tiết lỗi: {last_error}"
     )
 
 
@@ -352,38 +350,6 @@ def translate_texts(
 # EXCEL
 # ============================================================
 
-def copy_sheet_properties(src, dst):
-    """Sao chép các thuộc tính sheet phổ biến."""
-
-    dst.sheet_view.showGridLines = src.sheet_view.showGridLines
-    dst.freeze_panes = src.freeze_panes
-
-    dst.sheet_format.defaultRowHeight = (
-        src.sheet_format.defaultRowHeight
-    )
-    dst.sheet_format.defaultColWidth = (
-        src.sheet_format.defaultColWidth
-    )
-
-    if src.sheet_properties.pageSetUpPr:
-        dst.sheet_properties.pageSetUpPr = copy(
-            src.sheet_properties.pageSetUpPr
-        )
-
-    dst.page_margins = copy(src.page_margins)
-    dst.page_setup = copy(src.page_setup)
-    dst.print_options = copy(src.print_options)
-
-    for key, value in src.column_dimensions.items():
-        dst.column_dimensions[key].width = value.width
-        dst.column_dimensions[key].hidden = value.hidden
-        dst.column_dimensions[key].bestFit = value.bestFit
-
-    for key, value in src.row_dimensions.items():
-        dst.row_dimensions[key].height = value.height
-        dst.row_dimensions[key].hidden = value.hidden
-
-
 def translate_excel(
     uploaded_bytes,
     filename,
@@ -395,8 +361,7 @@ def translate_excel(
     progress=None,
 ):
     """
-    Dịch workbook trực tiếp trên bản sao.
-    Không tạo workbook mới.
+    Dịch workbook trực tiếp trên bản sao với việc tính toán chiều cao dòng thông minh.
     """
 
     keep_vba = filename.lower().endswith(".xlsm")
@@ -428,7 +393,7 @@ def translate_excel(
                 locations.append(
                     (ws.title, cell.coordinate)
                 )
-                texts.append(value.strip())
+                texts.append(str(value).strip())
 
     if not texts:
         if progress:
@@ -462,25 +427,27 @@ def translate_excel(
         translation = results[idx]
 
         if mode == "bilingual":
-            cell.value = bilingual_text(
+            new_value = bilingual_text(
                 cell.value,
                 translation,
             )
+            cell.value = new_value
 
             preserve_alignment_with_wrap(cell)
 
-            # Chỉ tăng chiều cao nếu chưa được cố định.
+            # Cải tiến 1: Tính toán chiều cao dòng động và thông minh hơn
             row_dim = ws.row_dimensions[cell.row]
-
-            if row_dim.height is None:
-                old_height = 15
-                row_dim.height = max(
-                    old_height,
-                    30,
-                )
+            current_height = row_dim.height or 15
+            
+            # Đếm tổng số dòng sau khi ghép song ngữ
+            num_lines = str(new_value).count("\n") + 1
+            calculated_height = max(current_height, num_lines * 18, 30)
+            
+            row_dim.height = min(calculated_height, 120)
 
         else:
             cell.value = translation
+            preserve_alignment_with_wrap(cell)
 
     return save_workbook(wb)
 
@@ -496,10 +463,6 @@ def save_workbook(wb):
 # ============================================================
 
 def prepare_image_bytes(image_bytes, filename):
-    """
-    Đọc ảnh, tự động xoay theo EXIF và xuất PNG.
-    Giúp Gemini nhận ảnh ổn định hơn.
-    """
     image = Image.open(io.BytesIO(image_bytes))
     image = ImageOps.exif_transpose(image)
 
@@ -650,9 +613,14 @@ def extract_table_from_image(
 
             return table
 
+        except APIError as api_exc:
+            last_error = api_exc
+            if api_exc.code == 429:
+                time.sleep(4 * attempt)
+            elif attempt < MAX_RETRIES:
+                time.sleep(2 ** (attempt - 1))
         except Exception as exc:
             last_error = exc
-
             if attempt < MAX_RETRIES:
                 time.sleep(2 ** (attempt - 1))
 
@@ -666,10 +634,6 @@ def extract_table_from_image(
 # ============================================================
 
 def normalize_image_cells(table):
-    """
-    Loại cell trùng vị trí bắt đầu.
-    Nếu Gemini vô tình trả trùng, giữ cell đầu tiên.
-    """
     unique = {}
     for cell in table.cells:
         key = (cell.row, cell.col)
@@ -737,12 +701,7 @@ def make_image_excel(
     ws = wb.active
     ws.title = "Translated"
 
-    # --------------------------------------------------------
-    # TITLE
-    # --------------------------------------------------------
-
     has_title = bool(table.title.strip())
-
     start_row = 1
 
     if has_title:
@@ -753,7 +712,6 @@ def make_image_excel(
                 table.title,
                 title_translation,
             )
-
         elif mode == "translated" and title_translation:
             title_value = title_translation
 
@@ -789,10 +747,6 @@ def make_image_excel(
 
         start_row = 2
 
-    # --------------------------------------------------------
-    # TABLE
-    # --------------------------------------------------------
-
     thin = Side(
         style="thin",
         color=THIN_GRAY,
@@ -812,14 +766,12 @@ def make_image_excel(
 
     cells = normalize_image_cells(table)
 
-    # Tạo toàn bộ cell trước.
     for r in range(row_count):
         for c in range(col_count):
             excel_cell = ws.cell(
                 start_row + r,
                 c + 1,
             )
-
             excel_cell.border = border
             excel_cell.alignment = Alignment(
                 horizontal="center",
@@ -827,7 +779,6 @@ def make_image_excel(
                 wrap_text=True,
             )
 
-    # Ghi dữ liệu.
     for image_cell in cells:
         r = image_cell.row
         c = image_cell.col
@@ -869,8 +820,6 @@ def make_image_excel(
             wrap_text=True,
         )
 
-        # Header:
-        # các cell nằm ở hàng đầu tiên của bảng được tô cam.
         if r == 0:
             excel_cell.fill = orange_fill
             excel_cell.font = Font(
@@ -885,10 +834,6 @@ def make_image_excel(
                 size=11,
                 color=BLACK,
             )
-
-    # --------------------------------------------------------
-    # MERGE
-    # --------------------------------------------------------
 
     merged_ranges = set()
 
@@ -934,13 +879,7 @@ def make_image_excel(
             ws.merge_cells(range_ref)
             merged_ranges.add(range_ref)
         except Exception:
-            # Nếu Gemini nhận dạng merge xung đột,
-            # không làm hỏng toàn bộ file.
             pass
-
-    # --------------------------------------------------------
-    # WIDTH / HEIGHT
-    # --------------------------------------------------------
 
     for col in range(1, col_count + 1):
         letter = get_column_letter(col)
@@ -998,14 +937,15 @@ def make_image_excel(
                 ),
             )
 
-        height = 20 * max_lines
+        # Cải tiến 1 áp dụng cho phần xuất Excel từ Image
+        height = max(22, max_lines * 18)
 
         if max_chars > 45:
             height += 10
 
         ws.row_dimensions[row].height = min(
-            max(22, height),
-            90,
+            height,
+            100,
         )
 
     ws.sheet_view.showGridLines = False
@@ -1219,7 +1159,7 @@ with st.sidebar:
 - Sửa trực tiếp trên bản sao
 - Giữ merge và style của ô
 - Giữ font, màu, border
-- Giữ width/height
+- Giữ width/height động thông minh
 - Giữ freeze panes
 - Giữ các thuộc tính sheet chính
 - XLSM: cố gắng bảo toàn VBA bằng `keep_vba=True`
@@ -1280,15 +1220,7 @@ if uploaded:
 5. Dịch nội dung chữ.
 6. Dựng Excel.
 7. Xuất file `.xlsx`.
-
-### Song ngữ
-
-Ví dụ:
-
-```text
-员工姓名
-Họ tên nhân viên
-"""
+                """
             )
 
         if st.button(
