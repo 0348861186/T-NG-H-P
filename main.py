@@ -30,7 +30,7 @@ from google.genai.errors import APIError
 
 APP_TITLE = "🇨🇳 ↔ 🇻🇳 Trung ↔ Việt Excel & Image Translator"
 
-MODEL_DEFAULT = "gemini-3.7-flash"
+MODEL_DEFAULT = "gemini-2.5-flash"
 BATCH_SIZE = 30
 MAX_RETRIES = 3
 
